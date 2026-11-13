@@ -1,0 +1,14 @@
+name: Setup A
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Runner ready
+        run: echo "Setup A runner started"
