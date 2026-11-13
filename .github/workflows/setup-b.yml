@@ -9,6 +9,17 @@ permissions:
 jobs:
   runner:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Runner ready
-        run: echo "Setup B runner started"
+      - name: Checkout private bot
+        uses: actions/checkout@v4
+        with:
+          repository: mishraarvind463-del/xaut-bot
+          token: ${{ secrets.BOT_REPO_TOKEN }}
+          path: private-bot
+          persist-credentials: false
+
+      - name: Verify private bot connection
+        run: |
+          echo "Private bot repository connected"
+          ls -la private-bot
