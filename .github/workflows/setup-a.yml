@@ -19,7 +19,13 @@ jobs:
           path: private-bot
           persist-credentials: false
 
-      - name: Verify private bot connection
-        run: |
-          echo "Private bot repository connected"
-          ls -la private-bot
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r private-bot/requirements.txt
+
+      - name: Check bot syntax
+        run: python -m py_compile private-bot/bot.py
