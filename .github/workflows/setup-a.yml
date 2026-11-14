@@ -19,7 +19,7 @@ jobs:
       API_KEY: ${{ secrets.API_KEY }}
       API_SECRET: ${{ secrets.API_SECRET }}
       ENABLE_LIVE_TRADING: "false"
-      BOT_RUNTIME_MINUTES: "10"
+      BOT_RUNTIME_MINUTES: "30"
 
     steps:
       - name: Checkout private bot
