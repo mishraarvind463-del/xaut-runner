@@ -39,7 +39,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          RUNS_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/Setup%20A.yml/runs?per_page=30")"
+          RUNS_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/Setup-a.yml/runs?per_page=30")"
           PREVIOUS_RUN_ID="$(printf '%s' "$RUNS_JSON" | jq -r --arg current "$GITHUB_RUN_ID" '
             [.workflow_runs[]
               | select((.id | tostring) != $current)
