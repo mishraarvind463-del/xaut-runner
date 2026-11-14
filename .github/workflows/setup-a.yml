@@ -6,9 +6,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: xaut-trading-bot
+  cancel-in-progress: false
+
 jobs:
   runner:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
 
     env:
       API_KEY: ${{ secrets.API_KEY }}
@@ -31,7 +36,23 @@ jobs:
           python-version: '3.12'
 
       - name: Install dependencies
-        run: pip install -r private-bot/requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r private-bot/requirements.txt
+
+      - name: Detect Runner Public IP
+        run: |
+          IP=$(curl -4 -sS https://api.ipify.org)
+          echo "================================="
+          echo "GITHUB RUNNER PUBLIC IP:"
+          echo "$IP"
+          echo "================================="
+
+      - name: Wait 90 Seconds for Delta IP Whitelist
+        run: |
+          echo "You have 90 seconds to add the displayed IP to Delta Exchange API whitelist."
+          sleep 90
+          echo "90 seconds completed. Starting bot."
 
       - name: Run bot in Paper Mode
-        run: python private-bot/bot.py
+        run: python -u private-bot/bot.py
