@@ -56,3 +56,12 @@ jobs:
 
       - name: Run bot in Paper Mode
         run: python -u private-bot/bot.py
+
+      - name: Save Paper Trade History
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xaut-paper-trade-history
+          path: trade_history.csv
+          if-no-files-found: warn
+          retention-days: 30
