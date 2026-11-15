@@ -1000,6 +1000,13 @@ jobs:
           print("Graceful shutdown code is present in private-bot/bot.py.")
           PY
 
+      - name: Run isolated forced-interruption safety simulation
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/test_forced_interruption_simulation.py private-bot/bot.py
+
       - name: Record bot source revision
         timeout-minutes: 2
         shell: bash
