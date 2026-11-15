@@ -58,7 +58,7 @@ jobs:
             -f "branch=${GITHUB_REF_NAME}" \
             -f "event=workflow_dispatch" \
             -F "per_page=100" \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/setup-a.yml/runs")"
+            "repos/${GITHUB_REPOSITORY}/actions/runs")"
 
           mapfile -t PREVIOUS_RUN_IDS < <(printf '%s' "$RUNS_JSON" | jq -r \
             --arg current "$GITHUB_RUN_ID" \
