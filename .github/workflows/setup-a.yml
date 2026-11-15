@@ -17,8 +17,8 @@ concurrency:
 jobs:
   runner:
     runs-on: ubuntu-latest
-    # Short integration-test window; leaves time for checkpoint upload/verification.
-    timeout-minutes: 30
+    # 15-minute Paper test runtime plus startup, graceful shutdown, and checkpoint upload.
+    timeout-minutes: 45
 
     steps:
       - name: Checkout private bot
@@ -319,62 +319,6 @@ jobs:
               TARGET_BLOCKED_CREATED_AT="$(printf '%s' "$CANDIDATE_BLOCKED_ATTEMPT_META" | jq -r '.run_started_at // .created_at // empty')"
               TARGET_BLOCKED_RUN_ATTEMPT="$CANDIDATE_BLOCKED_RUN_ATTEMPT"
               TARGET_BLOCKED_ALLOW_SUCCESS="$CANDIDATE_ALLOW_SUCCESS"
-              break
-            done
-          fi
-
-          # A later successful Setup A attempt with matching state/start artifacts
-          # supersedes an older blocked attempt. This prevents stale manual approvals
-          # from rolling the bot back past a newer Paper checkpoint.
-          if [[ -n "$TARGET_BLOCKED_RUN_ID" && "$TARGET_BLOCKED_RUN_ID" != "$GITHUB_RUN_ID" && -n "$TARGET_BLOCKED_CREATED_AT" ]]; then
-            for CHECKPOINT_RUN_ID in "${PREVIOUS_RUN_IDS[@]}"; do
-              [[ "$CHECKPOINT_RUN_ID" != "$TARGET_BLOCKED_RUN_ID" ]] || continue
-              CHECKPOINT_ARTIFACTS="$(gh_retry api --method GET \
-                "repos/${GITHUB_REPOSITORY}/actions/runs/${CHECKPOINT_RUN_ID}/artifacts?per_page=100")"
-              CHECKPOINT_MARKER_ATTEMPT="$(printf '%s' "$CHECKPOINT_ARTIFACTS" | jq -r '
-                [.artifacts[]? | select(.expired == false)
-                 | select(.name | test("^xaut-run-started-a[0-9]+$"))
-                 | (.name | capture("^xaut-run-started-a(?<attempt>[0-9]+)$").attempt | tonumber)]
-                | if length == 0 then 0 else max end
-              ')"
-              CHECKPOINT_STATE_ATTEMPT="$(printf '%s' "$CHECKPOINT_ARTIFACTS" | jq -r '
-                [.artifacts[]? | select(.expired == false)
-                 | select(.name | test("^xaut-paper-state-a[0-9]+$"))
-                 | (.name | capture("^xaut-paper-state-a(?<attempt>[0-9]+)$").attempt | tonumber)]
-                | if length == 0 then 0 else max end
-              ')"
-              [[ "$CHECKPOINT_MARKER_ATTEMPT" -gt 0 && "$CHECKPOINT_MARKER_ATTEMPT" -eq "$CHECKPOINT_STATE_ATTEMPT" ]] || continue
-
-              CHECKPOINT_ATTEMPT_META="$(gh_retry api --method GET \
-                "repos/${GITHUB_REPOSITORY}/actions/runs/${CHECKPOINT_RUN_ID}/attempts/${CHECKPOINT_STATE_ATTEMPT}")"
-              printf '%s' "$CHECKPOINT_ATTEMPT_META" | jq -e \
-                --arg repo "$GITHUB_REPOSITORY" \
-                --arg branch "$GITHUB_REF_NAME" \
-                --arg workflow "$WORKFLOW_PATH" \
-                --arg attempt "$CHECKPOINT_STATE_ATTEMPT" '
-                  .repository.full_name == $repo and
-                  .head_branch == $branch and
-                  .event == "workflow_dispatch" and
-                  .status == "completed" and
-                  ((.path // "") | split("@")[0]) == $workflow and
-                  (.run_attempt | tostring) == $attempt
-                ' >/dev/null || {
-                  echo "::error::Could not validate exact checkpoint attempt ${CHECKPOINT_RUN_ID}/${CHECKPOINT_STATE_ATTEMPT}."; exit 1;
-                }
-              CHECKPOINT_CONCLUSION="$(printf '%s' "$CHECKPOINT_ATTEMPT_META" | jq -r '.conclusion // ""')"
-              [[ "$CHECKPOINT_CONCLUSION" == "success" ]] || continue
-              CHECKPOINT_CREATED_AT="$(printf '%s' "$CHECKPOINT_ATTEMPT_META" | jq -r '.run_started_at // .created_at // empty')"
-              [[ -n "$CHECKPOINT_CREATED_AT" ]] || continue
-
-              if [[ "$CHECKPOINT_CREATED_AT" > "$TARGET_BLOCKED_CREATED_AT" ]]; then
-                echo "Verified newer successful checkpoint in run ${CHECKPOINT_RUN_ID}, attempt ${CHECKPOINT_STATE_ATTEMPT}, supersedes older blocked run ${TARGET_BLOCKED_RUN_ID}."
-                TARGET_BLOCKED_RUN_ID=""
-                TARGET_BLOCKED_CREATED_AT=""
-                TARGET_BLOCKED_RUN_ATTEMPT=""
-                TARGET_BLOCKED_ALLOW_SUCCESS="false"
-              fi
-              # Run IDs are newest-first, so the first successful matching
-              # checkpoint is the newest one; older runs cannot supersede more.
               break
             done
           fi
@@ -1007,6 +951,39 @@ jobs:
           python -m pip install --retries 5 --timeout 30 -r private-bot/requirements.txt
           python -m pip check
 
+      - name: Verify graceful-stop support in bot
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile private-bot/bot.py
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          path = Path("private-bot/bot.py")
+          source = path.read_text(encoding="utf-8")
+          tree = ast.parse(source, filename=str(path))
+          functions = {
+              node.name for node in ast.walk(tree)
+              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+          }
+          required = {
+              "install_shutdown_signal_handlers",
+              "stop_requested",
+              "wait_or_stop",
+              "shutdown_bot",
+          }
+          missing = sorted(required - functions)
+          if missing:
+              raise SystemExit(
+                  "Private bot is missing graceful-shutdown support: " + ", ".join(missing)
+              )
+          if "SIGTERM" not in source or "SIGINT" not in source:
+              raise SystemExit("Private bot does not handle both SIGTERM and SIGINT.")
+          print("Graceful shutdown code is present in private-bot/bot.py.")
+          PY
+
       - name: Record bot source revision
         timeout-minutes: 2
         shell: bash
@@ -1089,14 +1066,14 @@ jobs:
       - name: Run bot in Paper Mode
         id: run_bot
         if: steps.upload_run_marker.outcome == 'success'
-        # Allow the 10-minute bot run plus a small shutdown margin.
-        timeout-minutes: 15
+        # 15-minute test runtime plus a generous graceful-shutdown margin.
+        timeout-minutes: 25
         env:
           API_KEY: ${{ secrets.API_KEY }}
           API_SECRET: ${{ secrets.API_SECRET }}
           ENABLE_LIVE_TRADING: "false"
-          # Short runtime for the recovery integration test.
-          BOT_RUNTIME_MINUTES: "10"
+          # Temporary fast test setting. Change to 350 only after all takeover tests pass.
+          BOT_RUNTIME_MINUTES: "15"
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
