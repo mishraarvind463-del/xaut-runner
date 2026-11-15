@@ -323,6 +323,62 @@ jobs:
             done
           fi
 
+          # A later successful Setup A attempt with matching state/start artifacts
+          # supersedes an older blocked attempt. This prevents stale manual approvals
+          # from rolling the bot back past a newer Paper checkpoint.
+          if [[ -n "$TARGET_BLOCKED_RUN_ID" && "$TARGET_BLOCKED_RUN_ID" != "$GITHUB_RUN_ID" && -n "$TARGET_BLOCKED_CREATED_AT" ]]; then
+            for CHECKPOINT_RUN_ID in "${PREVIOUS_RUN_IDS[@]}"; do
+              [[ "$CHECKPOINT_RUN_ID" != "$TARGET_BLOCKED_RUN_ID" ]] || continue
+              CHECKPOINT_ARTIFACTS="$(gh_retry api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${CHECKPOINT_RUN_ID}/artifacts?per_page=100")"
+              CHECKPOINT_MARKER_ATTEMPT="$(printf '%s' "$CHECKPOINT_ARTIFACTS" | jq -r '
+                [.artifacts[]? | select(.expired == false)
+                 | select(.name | test("^xaut-run-started-a[0-9]+$"))
+                 | (.name | capture("^xaut-run-started-a(?<attempt>[0-9]+)$").attempt | tonumber)]
+                | if length == 0 then 0 else max end
+              ')"
+              CHECKPOINT_STATE_ATTEMPT="$(printf '%s' "$CHECKPOINT_ARTIFACTS" | jq -r '
+                [.artifacts[]? | select(.expired == false)
+                 | select(.name | test("^xaut-paper-state-a[0-9]+$"))
+                 | (.name | capture("^xaut-paper-state-a(?<attempt>[0-9]+)$").attempt | tonumber)]
+                | if length == 0 then 0 else max end
+              ')"
+              [[ "$CHECKPOINT_MARKER_ATTEMPT" -gt 0 && "$CHECKPOINT_MARKER_ATTEMPT" -eq "$CHECKPOINT_STATE_ATTEMPT" ]] || continue
+
+              CHECKPOINT_ATTEMPT_META="$(gh_retry api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${CHECKPOINT_RUN_ID}/attempts/${CHECKPOINT_STATE_ATTEMPT}")"
+              printf '%s' "$CHECKPOINT_ATTEMPT_META" | jq -e \
+                --arg repo "$GITHUB_REPOSITORY" \
+                --arg branch "$GITHUB_REF_NAME" \
+                --arg workflow "$WORKFLOW_PATH" \
+                --arg attempt "$CHECKPOINT_STATE_ATTEMPT" '
+                  .repository.full_name == $repo and
+                  .head_branch == $branch and
+                  .event == "workflow_dispatch" and
+                  .status == "completed" and
+                  ((.path // "") | split("@")[0]) == $workflow and
+                  (.run_attempt | tostring) == $attempt
+                ' >/dev/null || {
+                  echo "::error::Could not validate exact checkpoint attempt ${CHECKPOINT_RUN_ID}/${CHECKPOINT_STATE_ATTEMPT}."; exit 1;
+                }
+              CHECKPOINT_CONCLUSION="$(printf '%s' "$CHECKPOINT_ATTEMPT_META" | jq -r '.conclusion // ""')"
+              [[ "$CHECKPOINT_CONCLUSION" == "success" ]] || continue
+              CHECKPOINT_CREATED_AT="$(printf '%s' "$CHECKPOINT_ATTEMPT_META" | jq -r '.run_started_at // .created_at // empty')"
+              [[ -n "$CHECKPOINT_CREATED_AT" ]] || continue
+
+              if [[ "$CHECKPOINT_CREATED_AT" > "$TARGET_BLOCKED_CREATED_AT" ]]; then
+                echo "Verified newer successful checkpoint in run ${CHECKPOINT_RUN_ID}, attempt ${CHECKPOINT_STATE_ATTEMPT}, supersedes older blocked run ${TARGET_BLOCKED_RUN_ID}."
+                TARGET_BLOCKED_RUN_ID=""
+                TARGET_BLOCKED_CREATED_AT=""
+                TARGET_BLOCKED_RUN_ATTEMPT=""
+                TARGET_BLOCKED_ALLOW_SUCCESS="false"
+              fi
+              # Run IDs are newest-first, so the first successful matching
+              # checkpoint is the newest one; older runs cannot supersede more.
+              break
+            done
+          fi
+
           if [[ -n "$TARGET_BLOCKED_RUN_ID" && -n "$TARGET_BLOCKED_CREATED_AT" ]]; then
             APPROVED_RECOVERY_IDS="$(printf '%s' "$RUNS_JSON" | jq -r \
               --arg recovery_workflow "$RECOVERY_WORKFLOW_PATH" \
