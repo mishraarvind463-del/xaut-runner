@@ -1,5 +1,5 @@
 name: Setup A
-run-name: Setup A - Paper State v2
+run-name: Setup A - Paper State v3
 
 on:
   workflow_dispatch:
@@ -22,149 +22,571 @@ jobs:
       API_SECRET: ${{ secrets.API_SECRET }}
       ENABLE_LIVE_TRADING: "false"
       BOT_RUNTIME_MINUTES: "10"
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      SMTP_USE_SSL: ${{ secrets.SMTP_USE_SSL || 'false' }}
+      ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+      ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM || secrets.SMTP_USER }}
 
     steps:
       - name: Checkout private bot
-        uses: actions/checkout@v4
+        id: checkout_bot
+        uses: actions/checkout@v7
         with:
           repository: mishraarvind463-del/xaut-bot
           token: ${{ secrets.BOT_REPO_TOKEN }}
           path: private-bot
           persist-credentials: false
 
-      - name: Restore previous Paper state
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Restore latest verified Paper state
+        id: restore_state
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
 
-          RUNS_JSON="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/runs?per_page=100")"
+          WORKFLOW_PATH=".github/workflows/setup-a.yml"
+          RUNS_JSON="$(gh api --paginate --slurp \
+            -f "branch=${GITHUB_REF_NAME}" \
+            -f "event=workflow_dispatch" \
+            -F "per_page=100" \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/setup-a.yml/runs")"
 
-          PREVIOUS_RUN_ID="$(printf '%s' "$RUNS_JSON" | jq -r \
-            --arg current "$GITHUB_RUN_ID" '
+          mapfile -t PREVIOUS_RUN_IDS < <(printf '%s' "$RUNS_JSON" | jq -r \
+            --arg current "$GITHUB_RUN_ID" \
+            --arg workflow "$WORKFLOW_PATH" \
+            --arg branch "$GITHUB_REF_NAME" '
               [
-                .workflow_runs[]
-                | select(
-                    (.path | split("@")[0])
-                    == ".github/workflows/setup-a.yml"
-                  )
+                .[].workflow_runs[]?
                 | select((.id | tostring) != $current)
                 | select(.status == "completed")
+                | select(.head_branch == $branch)
+                | select(.event == "workflow_dispatch")
+                | select(((.path // "") | split("@")[0]) == $workflow)
               ]
-              | if length > 0 then .[0].id else "" end
-            ')"
+              | sort_by(.created_at, .id)
+              | reverse
+              | .[].id
+            ')
+
+          PREVIOUS_RUN_ID=""
+          PREVIOUS_ARTIFACT_NAME=""
+          LEGACY_RUN_ID=""
+
+          # A GitHub "re-run" keeps the same run ID. Inspect artifacts from
+          # earlier attempts of this very run before looking at older run IDs.
+          CURRENT_ARTIFACTS_JSON="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100")"
+          CURRENT_MARKER_ATTEMPT_MAX="$(printf '%s' "$CURRENT_ARTIFACTS_JSON" | jq -r '
+            [.artifacts[]? | select(.name | test("^xaut-run-started-a[0-9]+$"))
+             | (.name | capture("^xaut-run-started-a(?<attempt>[0-9]+)$").attempt | tonumber)]
+            | if length == 0 then 0 else max end
+          ')"
+          CURRENT_STATE_ATTEMPT_MAX="$(printf '%s' "$CURRENT_ARTIFACTS_JSON" | jq -r '
+            [.artifacts[]? | select(.expired == false)
+             | select(.name | test("^xaut-paper-state-a[0-9]+$"))
+             | (.name | capture("^xaut-paper-state-a(?<attempt>[0-9]+)$").attempt | tonumber)]
+            | if length == 0 then 0 else max end
+          ')"
+          CURRENT_FIXED_STATE="$(printf '%s' "$CURRENT_ARTIFACTS_JSON" | jq -r '
+            any(.artifacts[]?; .name == "xaut-paper-state" and .expired == false)
+          ')"
+          CURRENT_FIXED_MARKER="$(printf '%s' "$CURRENT_ARTIFACTS_JSON" | jq -r '
+            any(.artifacts[]?; .name == "xaut-run-started")
+          ')"
+
+          if [[ "$CURRENT_MARKER_ATTEMPT_MAX" -gt "$CURRENT_STATE_ATTEMPT_MAX" ]]; then
+            echo "::error::This run has a previous attempt that started the bot but did not save a checkpoint."
+            echo "::error::Do not re-run against an older state; manual recovery is required."
+            exit 1
+          elif [[ "$CURRENT_STATE_ATTEMPT_MAX" -gt 0 ]]; then
+            if [[ "$CURRENT_MARKER_ATTEMPT_MAX" -ne "$CURRENT_STATE_ATTEMPT_MAX" ]]; then
+              echo "::error::Current-run checkpoint and start-marker attempts do not match."
+              exit 1
+            fi
+            PREVIOUS_RUN_ID="$GITHUB_RUN_ID"
+            PREVIOUS_ARTIFACT_NAME="xaut-paper-state-a${CURRENT_STATE_ATTEMPT_MAX}"
+            echo "Re-running this GitHub run; restoring its latest complete attempt ${CURRENT_STATE_ATTEMPT_MAX}."
+          elif [[ "$CURRENT_FIXED_STATE" == "true" ]]; then
+            PREVIOUS_RUN_ID="$GITHUB_RUN_ID"
+            PREVIOUS_ARTIFACT_NAME="xaut-paper-state"
+            echo "Re-running a legacy attempt; restoring its fixed-name state artifact."
+          elif [[ "$CURRENT_FIXED_MARKER" == "true" ]]; then
+            echo "::error::This run has a legacy start marker but no matching state artifact."
+            exit 1
+          fi
 
           if [[ -z "$PREVIOUS_RUN_ID" ]]; then
-            echo "No previous completed Setup A run."
-            echo "Starting first Paper state."
-            exit 0
+            for RUN_ID in "${PREVIOUS_RUN_IDS[@]}"; do
+              RUN_TITLE="$(printf '%s' "$RUNS_JSON" | jq -r \
+                --arg id "$RUN_ID" '
+                  .[].workflow_runs[]?
+                  | select((.id | tostring) == $id)
+                  | (.display_title // .name // "")
+                ' | head -n 1)"
+
+              ARTIFACTS_JSON="$(gh api \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100")"
+
+              MARKER_ATTEMPT_MAX="$(printf '%s' "$ARTIFACTS_JSON" | jq -r '
+                [.artifacts[]? | select(.name | test("^xaut-run-started-a[0-9]+$"))
+                 | (.name | capture("^xaut-run-started-a(?<attempt>[0-9]+)$").attempt | tonumber)]
+                | if length == 0 then 0 else max end
+              ')"
+              STATE_ATTEMPT_MAX="$(printf '%s' "$ARTIFACTS_JSON" | jq -r '
+                [.artifacts[]? | select(.expired == false)
+                 | select(.name | test("^xaut-paper-state-a[0-9]+$"))
+                 | (.name | capture("^xaut-paper-state-a(?<attempt>[0-9]+)$").attempt | tonumber)]
+                | if length == 0 then 0 else max end
+              ')"
+              HAS_STATE="$(printf '%s' "$ARTIFACTS_JSON" | jq -r '
+                any(.artifacts[]?; .name == "xaut-paper-state" and .expired == false)
+              ')"
+              HAS_START_MARKER="$(printf '%s' "$ARTIFACTS_JSON" | jq -r '
+                any(.artifacts[]?; .name == "xaut-run-started")
+              ')"
+              HAS_LEGACY="$(printf '%s' "$ARTIFACTS_JSON" | jq -r '
+                any(.artifacts[]?; .name == "xaut-paper-trade-history" and .expired == false)
+              ')"
+
+              if [[ "$MARKER_ATTEMPT_MAX" -gt "$STATE_ATTEMPT_MAX" ]]; then
+                echo "::error::Run ${RUN_ID} has a bot-started attempt without a verified state artifact."
+                echo "::error::Refusing to restore an older state or silently reset Paper state."
+                exit 1
+              elif [[ "$STATE_ATTEMPT_MAX" -gt 0 ]]; then
+                if [[ "$MARKER_ATTEMPT_MAX" -ne "$STATE_ATTEMPT_MAX" ]]; then
+                  echo "::error::Run ${RUN_ID} checkpoint/start-marker attempts do not match."
+                  exit 1
+                fi
+                PREVIOUS_RUN_ID="$RUN_ID"
+                PREVIOUS_ARTIFACT_NAME="xaut-paper-state-a${STATE_ATTEMPT_MAX}"
+                echo "Verified state from run ${RUN_ID}, attempt ${STATE_ATTEMPT_MAX} (${RUN_TITLE})."
+                break
+              fi
+
+              if [[ "$HAS_STATE" == "true" ]]; then
+                PREVIOUS_RUN_ID="$RUN_ID"
+                PREVIOUS_ARTIFACT_NAME="xaut-paper-state"
+                echo "Legacy verified-state candidate found: run ${RUN_ID} (${RUN_TITLE})."
+                break
+              fi
+
+              # The fixed-name marker belongs to an earlier v3 prototype. A
+              # marker without a fixed-name state artifact is ambiguous.
+              if [[ "$HAS_START_MARKER" == "true" ]]; then
+                echo "::error::Run ${RUN_ID} has a legacy bot-start marker but no usable state checkpoint."
+                exit 1
+              fi
+
+              # Older v2 workflows had no start marker. Missing/expired state for
+              # such a run is ambiguous, so do not guess that it failed pre-start.
+              if [[ "$RUN_TITLE" == *"Paper State v2"* ]]; then
+                echo "::error::Previous Paper State v2 run ${RUN_ID} has no usable state artifact."
+                echo "::error::Manual state recovery is required; no flat reset will be created."
+                exit 1
+              fi
+
+              if [[ "$RUN_TITLE" == *"Paper State v3"* ]]; then
+                echo "Skipping run ${RUN_ID}: bot-start marker was never uploaded. Bot did not start."
+              else
+                echo "Skipping pre-checkpoint/legacy run ${RUN_ID}: ${RUN_TITLE}"
+              fi
+
+              if [[ "$HAS_LEGACY" == "true" && -z "$LEGACY_RUN_ID" ]]; then
+                LEGACY_RUN_ID="$RUN_ID"
+              fi
+            done
           fi
 
-          PREVIOUS_RUN_TITLE="$(printf '%s' "$RUNS_JSON" | jq -r \
-            --arg id "$PREVIOUS_RUN_ID" '
-              .workflow_runs[]
-              | select((.id | tostring) == $id)
-              | (.display_title // .name // "")
-            ')"
+          if [[ -n "$PREVIOUS_RUN_ID" ]]; then
+            RESTORE_DIR="$RUNNER_TEMP/xaut-paper-state-restore"
+            rm -rf "$RESTORE_DIR"
+            mkdir -p "$RESTORE_DIR"
 
-          ARTIFACTS_JSON="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/runs/${PREVIOUS_RUN_ID}/artifacts?per_page=100")"
-
-          if printf '%s' "$ARTIFACTS_JSON" | jq -e '
-            any(.artifacts[]?;
-              .name == "xaut-paper-state" and .expired == false
-            )
-          ' >/dev/null; then
-
-            echo "Restoring Paper state from completed run ${PREVIOUS_RUN_ID}"
-
+            echo "Downloading Paper state from run ${PREVIOUS_RUN_ID}."
             gh run download "$PREVIOUS_RUN_ID" \
               --repo "$GITHUB_REPOSITORY" \
-              --name xaut-paper-state \
-              --dir "$GITHUB_WORKSPACE"
+              --name "$PREVIOUS_ARTIFACT_NAME" \
+              --dir "$RESTORE_DIR"
 
-            if [[ ! -s paper_state.json ]]; then
-              echo "::error::Paper state artifact is missing paper_state.json."
-              exit 1
-            fi
+            python - "$RESTORE_DIR" <<'PY'
+          import csv
+          import hashlib
+          import json
+          import math
+          import os
+          import shutil
+          import sys
+          from pathlib import Path
 
-            echo "Paper state restored."
+          source = Path(sys.argv[1])
+          allowed = {
+              "paper_state.json",
+              "alert_state.json",
+              "trade_history.csv",
+              "trade_history_legacy.csv",
+              "execution_journal.json",
+          }
+          required = "paper_state.json"
 
-          elif [[ "$PREVIOUS_RUN_TITLE" == *"Paper State v2"* ]]; then
+          def fail(message):
+              raise SystemExit(f"STATE RESTORE VALIDATION FAILED: {message}")
 
-            echo "::error::Previous Paper State v2 run has no usable state artifact."
-            echo "::error::Refusing to start with a reset state."
-            exit 1
+          def read_json(name):
+              path = source / name
+              try:
+                  with path.open("r", encoding="utf-8") as handle:
+                      value = json.load(handle)
+              except Exception as error:
+                  fail(f"cannot parse {name}: {error!r}")
+              if not isinstance(value, dict):
+                  fail(f"{name} root must be a JSON object")
+              return value
 
-          elif printf '%s' "$ARTIFACTS_JSON" | jq -e '
-            any(.artifacts[]?;
-              .name == "xaut-paper-trade-history" and .expired == false
-            )
-          ' >/dev/null; then
+          def validate_file(name):
+              path = source / name
+              if path.is_symlink() or not path.is_file():
+                  fail(f"{name} is not a regular file")
+              if name == "paper_state.json":
+                  data = read_json(name)
+                  if data.get("version") not in (1, 2):
+                      fail("unsupported Paper state version")
+                  if data.get("symbol") != "XAUTUSD" or int(data.get("product_id", -1)) != 131253:
+                      fail("Paper state symbol/product mismatch")
+                  state = data.get("state")
+                  if not isinstance(state, dict):
+                      fail("Paper state body is missing")
+                  position = float(state.get("position"))
+                  if not math.isfinite(position) or position not in (-1.0, 0.0, 1.0):
+                      fail("Paper state position is invalid")
+                  pending = state.get("pending_csv_trade")
+                  if pending is not None and not isinstance(pending, dict):
+                      fail("Paper CSV outbox is malformed")
+              elif name == "alert_state.json":
+                  data = read_json(name)
+                  if data.get("version") != 1:
+                      fail("unsupported alert-state version")
+                  if not isinstance(data.get("active_incidents"), dict) or not isinstance(data.get("queue"), list):
+                      fail("alert-state structure is invalid")
+              elif name == "trade_history.csv":
+                  with path.open("r", newline="", encoding="utf-8") as handle:
+                      reader = csv.DictReader(handle)
+                      expected = [
+                          "symbol", "mode", "direction", "quantity", "entry_time_utc",
+                          "exit_time_utc", "entry_price", "exit_price", "price_points",
+                          "cumulative_points", "exit_reason",
+                      ]
+                      if reader.fieldnames != expected:
+                          fail("trade-history CSV header mismatch")
+                      for _ in reader:
+                          pass
+              elif name == "trade_history_legacy.csv":
+                  with path.open("r", newline="", encoding="utf-8-sig") as handle:
+                      reader = csv.reader(handle)
+                      if not next(reader, None):
+                          fail("legacy CSV has no header")
+                      for _ in reader:
+                          pass
+              elif name == "execution_journal.json":
+                  data = read_json(name)
+                  if data.get("version") != 1 or data.get("symbol") != "XAUTUSD":
+                      fail("execution-journal schema/symbol mismatch")
+                  if int(data.get("product_id", -1)) != 131253:
+                      fail("execution-journal product mismatch")
+                  position = float(data.get("managed_position", 0))
+                  if not math.isfinite(position) or position not in (-1.0, 0.0, 1.0):
+                      fail("execution-journal managed position is invalid")
+                  if data.get("pending_order") is not None and not isinstance(data.get("pending_order"), dict):
+                      fail("execution-journal pending order is malformed")
 
-            echo "Legacy workflow detected. Preserving CSV history."
+          if not (source / required).is_file():
+              fail("paper_state.json is missing")
 
-            mkdir -p "$RUNNER_TEMP/legacy-paper-history"
+          manifest_path = source / "state_manifest.json"
+          if manifest_path.is_file():
+              manifest = read_json("state_manifest.json")
+              if manifest.get("schema_version") != 1:
+                  fail("unsupported checkpoint manifest schema")
+              if manifest.get("symbol") != "XAUTUSD" or int(manifest.get("product_id", -1)) != 131253:
+                  fail("checkpoint manifest symbol/product mismatch")
+              if manifest.get("mode") != "PAPER":
+                  fail("checkpoint manifest is not a Paper-mode checkpoint")
+              records = manifest.get("files")
+              if not isinstance(records, dict) or required not in records:
+                  fail("manifest does not list required paper_state.json")
+              names = set(records)
+              if not names.issubset(allowed):
+                  fail(f"manifest contains unexpected files: {sorted(names - allowed)}")
+              for name, record in records.items():
+                  if not isinstance(record, dict):
+                      fail(f"invalid manifest record for {name}")
+                  validate_file(name)
+                  path = source / name
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  if record.get("sha256") != digest:
+                      fail(f"SHA-256 mismatch for {name}")
+                  if int(record.get("size_bytes", -1)) != path.stat().st_size:
+                      fail(f"size mismatch for {name}")
+              file_names = sorted(names)
+              print("CHECKPOINT MANIFEST VERIFIED:", ", ".join(file_names))
+          else:
+              # One-time migration path for the currently stored v2 artifact.
+              # Its files are structurally checked; the next run writes checksums.
+              file_names = sorted(name for name in allowed if (source / name).exists())
+              validate_file(required)
+              for name in file_names:
+                  validate_file(name)
+              print("LEGACY PAPER STATE ARTIFACT STRUCTURALLY VERIFIED; checksum manifest will be added on this run.")
 
-            gh run download "$PREVIOUS_RUN_ID" \
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          for name in file_names:
+              shutil.copy2(source / name, workspace / name)
+          if manifest_path.is_file():
+              shutil.copy2(manifest_path, workspace / "state_manifest.json")
+          print("PAPER STATE RESTORED AND VALIDATED FROM RUN ARTIFACT.")
+          PY
+
+          elif [[ -n "$LEGACY_RUN_ID" ]]; then
+            LEGACY_DIR="$RUNNER_TEMP/xaut-legacy-paper-history"
+            rm -rf "$LEGACY_DIR"
+            mkdir -p "$LEGACY_DIR"
+            echo "No state checkpoint exists; preserving legacy CSV from run ${LEGACY_RUN_ID}."
+            gh run download "$LEGACY_RUN_ID" \
               --repo "$GITHUB_REPOSITORY" \
               --name xaut-paper-trade-history \
-              --dir "$RUNNER_TEMP/legacy-paper-history"
-
-            if [[ ! -s "$RUNNER_TEMP/legacy-paper-history/trade_history.csv" ]]; then
-              echo "::error::Legacy CSV file is missing."
+              --dir "$LEGACY_DIR"
+            LEGACY_CSV="$(find "$LEGACY_DIR" -type f -name trade_history.csv -print -quit)"
+            if [[ -z "$LEGACY_CSV" || ! -s "$LEGACY_CSV" ]]; then
+              echo "::error::Legacy trade-history artifact is missing or empty."
               exit 1
             fi
+            cp "$LEGACY_CSV" trade_history_legacy.csv
+            echo "Legacy history preserved separately. New Paper state will be initialized flat."
 
-            mv "$RUNNER_TEMP/legacy-paper-history/trade_history.csv" \
-              trade_history_legacy.csv
-
-            echo "Legacy CSV preserved separately."
+          elif [[ "${#PREVIOUS_RUN_IDS[@]}" -eq 0 ]]; then
+            echo "No previous completed Setup A run on this branch. Starting the first Paper state."
 
           else
-            echo "No previous state artifact found."
-            echo "Starting a new flat Paper state."
+            echo "No valid Paper checkpoint was found in previous runs."
+            echo "::error::Refusing to create a new flat state because prior history exists but no verified checkpoint is available."
+            exit 1
           fi
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      - name: Invalidate restored manifest before this run
+        run: rm -f state_manifest.json state_manifest.json.tmp
+
+      - name: Verify required API secrets are present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${API_KEY:-}" || -z "${API_SECRET:-}" ]]; then
+            echo "::error::API_KEY or API_SECRET repository secret is missing."
+            exit 1
+          fi
+          echo "Required Delta API secrets are present (values not displayed)."
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r private-bot/requirements.txt
+          set -euo pipefail
+          python -m pip install --upgrade pip --retries 5 --timeout 30
+          python -m pip install --retries 5 --timeout 30 -r private-bot/requirements.txt
+          python -m pip check
 
-      - name: Detect Runner Public IP
+      - name: Record bot source revision
+        shell: bash
         run: |
           set -euo pipefail
-          IP=$(curl -4 -sS https://api.ipify.org)
-          echo "================================="
-          echo "GITHUB RUNNER PUBLIC IP:"
-          echo "$IP"
-          echo "================================="
+          BOT_SHA="$(git -C private-bot rev-parse HEAD)"
+          echo "BOT_COMMIT_SHA=${BOT_SHA}" >> "$GITHUB_ENV"
+          {
+            echo "### Bot source"
+            echo "Private bot commit: \\`${BOT_SHA}\\`"
+            echo "Runner workflow commit: \\`${GITHUB_SHA}\\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Wait 90 Seconds for Delta IP Whitelist
+      - name: Detect runner public IP
+        id: runner_ip
+        shell: bash
         run: |
-          echo "You have 90 seconds to add the displayed IP to Delta Exchange API whitelist."
+          set -euo pipefail
+          IP=""
+          for attempt in 1 2 3 4 5; do
+            if IP="$(curl -4 -fsS --connect-timeout 10 --max-time 20 \
+              --retry 2 --retry-all-errors --retry-delay 2 https://api.ipify.org)" \
+              && [[ "$IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+              break
+            fi
+            echo "Public-IP lookup failed (attempt ${attempt}/5); retrying."
+            IP=""
+            sleep 3
+          done
+          if [[ -z "$IP" ]]; then
+            echo "::error::Could not detect a valid runner public IPv4 address."
+            exit 1
+          fi
+          echo "Runner public IP: ${IP}"
+          echo "ip=${IP}" >> "$GITHUB_OUTPUT"
+          echo "Delta API whitelist must include this temporary runner IP: ${IP}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for Delta IP whitelist
+        run: |
+          echo "Add the runner IP shown above to the Delta Exchange API whitelist."
+          echo "Waiting 90 seconds before the read-only Paper Mode bot starts."
           sleep 90
-          echo "90 seconds completed. Starting bot."
+
+      - name: Prepare bot-start marker
+        id: prepare_run_marker
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          payload = {
+              "workflow_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+              "workflow_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+              "repository": os.environ.get("GITHUB_REPOSITORY", ""),
+              "branch": os.environ.get("GITHUB_REF_NAME", ""),
+              "workflow_commit": os.environ.get("GITHUB_SHA", ""),
+              "bot_commit": os.environ.get("BOT_COMMIT_SHA", ""),
+              "created_at_utc": datetime.now(timezone.utc).isoformat(),
+          }
+          with open(os.path.join(os.environ["RUNNER_TEMP"], "xaut-run-started.json"), "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, separators=(",", ":"))
+          print("Run-start marker prepared. No API secret is written to it.")
+          PY
+
+      - name: Upload bot-start marker
+        id: upload_run_marker
+        uses: actions/upload-artifact@v7
+        with:
+          name: xaut-run-started-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/xaut-run-started.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Run bot in Paper Mode
+        id: run_bot
+        if: steps.upload_run_marker.outcome == 'success'
         run: python -u private-bot/bot.py
 
-      - name: Save Paper State for Next Run
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Validate and prepare state checkpoint
+        id: checkpoint
+        if: always() && steps.upload_run_marker.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import csv
+          import hashlib
+          import json
+          import math
+          import os
+          import shutil
+          from pathlib import Path
+
+          allowed = {
+              "paper_state.json",
+              "alert_state.json",
+              "trade_history.csv",
+              "trade_history_legacy.csv",
+              "execution_journal.json",
+          }
+          state_dir = Path("state-artifact")
+          if state_dir.exists():
+              shutil.rmtree(state_dir)
+          state_dir.mkdir(parents=True)
+
+          def fail(message):
+              raise SystemExit(f"CHECKPOINT VALIDATION FAILED: {message}")
+
+          manifest_path = Path("state_manifest.json")
+          if not manifest_path.is_file():
+              fail("bot did not create a new state_manifest.json; no artifact will be uploaded")
+          try:
+              manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          except Exception as error:
+              fail(f"manifest cannot be parsed: {error!r}")
+
+          if manifest.get("schema_version") != 1:
+              fail("unsupported manifest schema")
+          if manifest.get("symbol") != "XAUTUSD" or int(manifest.get("product_id", -1)) != 131253:
+              fail("manifest symbol/product mismatch")
+          if manifest.get("mode") != "PAPER":
+              fail("workflow is Paper-only but bot manifest is not PAPER")
+          run = manifest.get("run") or {}
+          if str(run.get("workflow_run_id", "")) != os.environ.get("GITHUB_RUN_ID", ""):
+              fail("manifest belongs to a different GitHub workflow run")
+          if str(run.get("workflow_run_attempt", "")) != os.environ.get("GITHUB_RUN_ATTEMPT", ""):
+              fail("manifest belongs to a different workflow attempt")
+
+          records = manifest.get("files")
+          if not isinstance(records, dict) or "paper_state.json" not in records:
+              fail("manifest is missing required paper_state.json")
+          names = set(records)
+          if not names.issubset(allowed):
+              fail(f"manifest contains unexpected file names: {sorted(names - allowed)}")
+
+          for temp_name in [name + ".tmp" for name in allowed] + ["state_manifest.json.tmp"]:
+              if Path(temp_name).exists():
+                  fail(f"unfinished atomic-write temporary file exists: {temp_name}")
+
+          for name, record in records.items():
+              path = Path(name)
+              if path.is_symlink() or not path.is_file():
+                  fail(f"checkpoint file is missing/not regular: {name}")
+              if not isinstance(record, dict):
+                  fail(f"manifest record is malformed: {name}")
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              if digest != record.get("sha256"):
+                  fail(f"SHA-256 mismatch: {name}")
+              if path.stat().st_size != int(record.get("size_bytes", -1)):
+                  fail(f"file-size mismatch: {name}")
+
+          paper = json.loads(Path("paper_state.json").read_text(encoding="utf-8"))
+          if paper.get("version") not in (1, 2) or paper.get("symbol") != "XAUTUSD":
+              fail("Paper state version/symbol is invalid")
+          if int(paper.get("product_id", -1)) != 131253 or not isinstance(paper.get("state"), dict):
+              fail("Paper state product/body is invalid")
+          position = float(paper["state"].get("position"))
+          if not math.isfinite(position) or position not in (-1.0, 0.0, 1.0):
+              fail("Paper position is invalid")
+          if paper["state"].get("pending_csv_trade") is not None:
+              fail("Paper CSV outbox remains unresolved")
+
+          if "alert_state.json" in records:
+              alert = json.loads(Path("alert_state.json").read_text(encoding="utf-8"))
+              if alert.get("version") != 1 or not isinstance(alert.get("active_incidents"), dict) or not isinstance(alert.get("queue"), list):
+                  fail("alert state is invalid")
+          if "trade_history.csv" in records:
+              with open("trade_history.csv", "r", newline="", encoding="utf-8") as handle:
+                  if csv.DictReader(handle).fieldnames != [
+                      "symbol", "mode", "direction", "quantity", "entry_time_utc",
+                      "exit_time_utc", "entry_price", "exit_price", "price_points",
+                      "cumulative_points", "exit_reason",
+                  ]:
+                      fail("trade-history CSV header mismatch")
+
+          for name in sorted(names):
+              shutil.copy2(name, state_dir / name)
+          shutil.copy2(manifest_path, state_dir / "state_manifest.json")
+          print("Verified checkpoint ready for upload:", ", ".join(sorted(names)))
+          PY
+
+      - name: Upload verified Paper state
+        if: always() && steps.checkpoint.outcome == 'success'
+        uses: actions/upload-artifact@v7
         with:
-          name: xaut-paper-state
-          path: |
-            paper_state.json
-            alert_state.json
-            trade_history.csv
-            trade_history_legacy.csv
-          if-no-files-found: warn
+          name: xaut-paper-state-a${{ github.run_attempt }}
+          path: state-artifact/
+          if-no-files-found: error
           retention-days: 30
