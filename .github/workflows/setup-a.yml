@@ -201,19 +201,61 @@ jobs:
           # Check for it before preferring a checkpoint artifact that may exist but be corrupt.
           TARGET_BLOCKED_RUN_ID=""
           TARGET_BLOCKED_CREATED_AT=""
-          if [[ "$CURRENT_MARKER_ATTEMPT_MAX" -gt 0 || "$CURRENT_FIXED_MARKER" == "true" ]]; then
+          TARGET_BLOCKED_RUN_ATTEMPT=""
+
+          # A re-run keeps its run ID. Check the exact earlier attempt that
+          # produced the marker; a marker by itself does not make a successful
+          # attempt blocked.
+          if [[ "$CURRENT_MARKER_ATTEMPT_MAX" -gt 0 && "$CURRENT_MARKER_ATTEMPT_MAX" -lt "$GITHUB_RUN_ATTEMPT" ]]; then
+            CURRENT_PRIOR_ATTEMPT_JSON="$(gh_retry api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${CURRENT_MARKER_ATTEMPT_MAX}")"
+            printf '%s' "$CURRENT_PRIOR_ATTEMPT_JSON" | jq -e --arg attempt "$CURRENT_MARKER_ATTEMPT_MAX" \
+              '(.run_attempt | tostring) == $attempt and .status == "completed"' >/dev/null || {
+                echo "::error::Could not validate the exact earlier Setup A attempt."; exit 1;
+              }
+            CURRENT_PRIOR_CONCLUSION="$(printf '%s' "$CURRENT_PRIOR_ATTEMPT_JSON" | jq -r '.conclusion // ""')"
+            case "$CURRENT_PRIOR_CONCLUSION" in
+              failure|cancelled|timed_out)
+                TARGET_BLOCKED_RUN_ID="$GITHUB_RUN_ID"
+                TARGET_BLOCKED_CREATED_AT="$(printf '%s' "$CURRENT_PRIOR_ATTEMPT_JSON" | jq -r '.run_started_at // .created_at // empty')"
+                TARGET_BLOCKED_RUN_ATTEMPT="$CURRENT_MARKER_ATTEMPT_MAX"
+                ;;
+            esac
+          elif [[ "$CURRENT_FIXED_MARKER" == "true" && "$CURRENT_FIXED_STATE" != "true" && "$GITHUB_RUN_ATTEMPT" -gt 1 ]]; then
             TARGET_BLOCKED_RUN_ID="$GITHUB_RUN_ID"
             TARGET_BLOCKED_CREATED_AT="$CURRENT_RUN_CREATED_AT"
-          elif [[ "${#PREVIOUS_RUN_IDS[@]}" -gt 0 ]]; then
+            TARGET_BLOCKED_RUN_ATTEMPT="$((GITHUB_RUN_ATTEMPT - 1))"
+          fi
+
+          if [[ -z "$TARGET_BLOCKED_RUN_ID" && "${#PREVIOUS_RUN_IDS[@]}" -gt 0 ]]; then
             for CANDIDATE_BLOCKED_ID in "${PREVIOUS_RUN_IDS[@]}"; do
+              CANDIDATE_BLOCKED_META="$(printf '%s' "$RUNS_JSON" | jq -c --arg id "$CANDIDATE_BLOCKED_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id)][0] // empty')"
+              CANDIDATE_BLOCKED_RUN_ATTEMPT="$(printf '%s' "$CANDIDATE_BLOCKED_META" | jq -r '.run_attempt | tostring')"
+              [[ "$CANDIDATE_BLOCKED_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || continue
+              CANDIDATE_BLOCKED_ATTEMPT_META="$(gh_retry api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_BLOCKED_ID}/attempts/${CANDIDATE_BLOCKED_RUN_ATTEMPT}")"
+              printf '%s' "$CANDIDATE_BLOCKED_ATTEMPT_META" | jq -e --arg attempt "$CANDIDATE_BLOCKED_RUN_ATTEMPT" \
+                '(.run_attempt | tostring) == $attempt and .status == "completed"' >/dev/null || {
+                  echo "::error::Could not validate exact Setup A attempt ${CANDIDATE_BLOCKED_RUN_ATTEMPT}."; exit 1;
+                }
+              CANDIDATE_BLOCKED_CONCLUSION="$(printf '%s' "$CANDIDATE_BLOCKED_ATTEMPT_META" | jq -r '.conclusion // ""')"
+              case "$CANDIDATE_BLOCKED_CONCLUSION" in
+                failure|cancelled|timed_out) ;;
+                *) continue ;;
+              esac
               CANDIDATE_BLOCKED_ARTIFACTS="$(gh_retry api --method GET \
                 "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_BLOCKED_ID}/artifacts?per_page=100")"
-              CANDIDATE_BLOCKED_TITLE="$(printf '%s' "$RUNS_JSON" | jq -r --arg id "$CANDIDATE_BLOCKED_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id) | (.display_title // .name // "")][0] // empty')"
-              if printf '%s' "$CANDIDATE_BLOCKED_ARTIFACTS" | jq -e '
-                any(.artifacts[]?; ((.name | test("^xaut-run-started-a[0-9]+$")) or .name == "xaut-run-started") and .expired == false)
-              ' >/dev/null || [[ "$CANDIDATE_BLOCKED_TITLE" == *"Paper State v2"* ]]; then
+              CANDIDATE_BLOCKED_TITLE="$(printf '%s' "$CANDIDATE_BLOCKED_META" | jq -r '.display_title // .name // ""')"
+              HAS_EXACT_BLOCKED_MARKER="$(printf '%s' "$CANDIDATE_BLOCKED_ARTIFACTS" | jq -r \
+                --arg marker "xaut-run-started-a${CANDIDATE_BLOCKED_RUN_ATTEMPT}" \
+                --argjson attempt "$CANDIDATE_BLOCKED_RUN_ATTEMPT" '
+                  any(.artifacts[]?; .name == $marker and .expired == false) or
+                  ($attempt == 1 and any(.artifacts[]?; .name == "xaut-run-started" and .expired == false))
+                ')"
+              if [[ "$HAS_EXACT_BLOCKED_MARKER" == "true" || "$CANDIDATE_BLOCKED_TITLE" == *"Paper State v2"* ]]; then
                 TARGET_BLOCKED_RUN_ID="$CANDIDATE_BLOCKED_ID"
-                TARGET_BLOCKED_CREATED_AT="$(printf '%s' "$RUNS_JSON" | jq -r --arg id "$TARGET_BLOCKED_RUN_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id) | .created_at][0] // empty')"
+                TARGET_BLOCKED_CREATED_AT="$(printf '%s' "$CANDIDATE_BLOCKED_ATTEMPT_META" | jq -r '.run_started_at // .created_at // empty')"
+                TARGET_BLOCKED_RUN_ATTEMPT="$CANDIDATE_BLOCKED_RUN_ATTEMPT"
                 break
               fi
             done
@@ -249,7 +291,8 @@ jobs:
                   MANUAL_RECOVERY="true"
                   BLOCKED_RUN_ID="$TARGET_BLOCKED_RUN_ID"
                   BLOCKED_CREATED_AT="$TARGET_BLOCKED_CREATED_AT"
-                  echo "Using explicit manual-recovery approval for blocked Setup A run ${BLOCKED_RUN_ID}."
+                  BLOCKED_RUN_ATTEMPT="$TARGET_BLOCKED_RUN_ATTEMPT"
+                  echo "Using explicit manual-recovery approval for blocked Setup A run ${BLOCKED_RUN_ID}, attempt ${BLOCKED_RUN_ATTEMPT}."
                   break
                 fi
               done <<< "$APPROVED_RECOVERY_IDS"
@@ -378,6 +421,9 @@ jobs:
           fi # end normal previous-state selection; an approved recovery takes precedence
 
           if [[ "$RECOVERY_REQUIRED" == "true" && "$MANUAL_RECOVERY" != "true" ]]; then
+            if [[ -z "$BLOCKED_RUN_ATTEMPT" && -n "$BLOCKED_RUN_ID" ]]; then
+              BLOCKED_RUN_ATTEMPT="$(printf '%s' "$RUNS_JSON" | jq -r --arg id "$BLOCKED_RUN_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id) | .run_attempt][0] // empty')"
+            fi
             if [[ -z "$BLOCKED_RUN_ID" || -z "$BLOCKED_CREATED_AT" ]]; then
               echo "::error::Could not identify the exact blocked Setup A run; manual recovery cannot be applied."
               exit 1
@@ -439,6 +485,7 @@ jobs:
               export RECOVERY_DIR="$RESTORE_DIR"
               export RECOVERY_RUN_ID="$PREVIOUS_RUN_ID"
               export BLOCKED_RUN_ID
+              export BLOCKED_RUN_ATTEMPT
               export EXPECTED_REPOSITORY="$GITHUB_REPOSITORY"
               export EXPECTED_BRANCH="$GITHUB_REF_NAME"
               export EXPECTED_ARTIFACT_NAME="$PREVIOUS_ARTIFACT_NAME"
@@ -446,9 +493,13 @@ jobs:
               export RECOVERY_RUN_META RUNNER_TEMP
               SOURCE_RUN_META="$RUNNER_TEMP/xaut-manual-recovery-source-run.json"
               SOURCE_ARTIFACT_META="$RUNNER_TEMP/xaut-manual-recovery-source-artifacts.json"
-              gh_retry api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${PREVIOUS_RUN_ID}" > "$RECOVERY_RUN_META"
+              RECOVERY_ATTEMPT="$(printf '%s' "$PREVIOUS_ARTIFACT_NAME" | sed -nE 's/^xaut-manual-recovery-approved-a([0-9]+)$/\1/p')"
+              [[ "$RECOVERY_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Manual-recovery artifact attempt suffix is invalid."; exit 1; }
+              gh_retry api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${PREVIOUS_RUN_ID}/attempts/${RECOVERY_ATTEMPT}" > "$RECOVERY_RUN_META"
               APPROVAL_SOURCE_RUN_ID="$(jq -r '.source_run_id' "$RESTORE_DIR/manual_recovery_approval.json")"
-              gh_retry api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${APPROVAL_SOURCE_RUN_ID}" > "$SOURCE_RUN_META"
+              APPROVAL_SOURCE_ATTEMPT="$(jq -r '.source_run_attempt' "$RESTORE_DIR/manual_recovery_approval.json")"
+              [[ "$APPROVAL_SOURCE_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || { echo "::error::Approved source attempt is invalid."; exit 1; }
+              gh_retry api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${APPROVAL_SOURCE_RUN_ID}/attempts/${APPROVAL_SOURCE_ATTEMPT}" > "$SOURCE_RUN_META"
               gh_retry api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${APPROVAL_SOURCE_RUN_ID}/artifacts?per_page=100" > "$SOURCE_ARTIFACT_META"
               export SOURCE_RUN_META SOURCE_ARTIFACT_META
 
@@ -490,6 +541,8 @@ jobs:
               fail("approval recovery attempt mismatch")
           if str(approval.get("blocked_run_id", "")) != os.environ["BLOCKED_RUN_ID"]:
               fail("approval is for a different blocked Setup A run")
+          if str(approval.get("blocked_run_attempt", "")) != os.environ["BLOCKED_RUN_ATTEMPT"]:
+              fail("approval is for a different blocked Setup A attempt")
           if approval.get("approved_by") != recovery_meta.get("actor", {}).get("login"):
               fail("approval actor does not match the GitHub workflow actor")
           if recovery_meta.get("created_at", "") <= str(approval.get("blocked_run_created_at", "")):
