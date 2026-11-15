@@ -237,8 +237,8 @@ jobs:
           source_run_meta = read_json(Path(os.environ["SOURCE_RUN_META"]))
           if str(source_run_meta.get("id", "")) != os.environ["SOURCE_RUN_ID"]:
               fail("GitHub source run metadata ID mismatch")
-
-                            fail("checkpoint runner commit does not match the selected GitHub source run")
+          if source_run_meta.get("head_sha") != run_meta.get("runner_commit_sha"):
+              fail("checkpoint runner commit does not match the selected GitHub source run")
           if str(run_meta.get("workflow_run_id", "")) != os.environ["SOURCE_RUN_ID"]:
               fail("checkpoint manifest run ID mismatch")
           if str(run_meta.get("workflow_run_attempt", "")) != os.environ["SOURCE_ATTEMPT"]:
@@ -406,4 +406,3 @@ jobs:
             echo "The next Setup A run can use this approval only for the exact blocked run recorded above."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "Approved recovery artifact verified and ready for the matching Setup A run."
-          if source_run_meta.get("head_sha") != run_meta.get("runner_commit_sha"):
