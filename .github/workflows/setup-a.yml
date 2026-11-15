@@ -17,7 +17,8 @@ concurrency:
 jobs:
   runner:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # GitHub-hosted jobs have a maximum timeout of 360 minutes.
+    timeout-minutes: 360
 
     steps:
       - name: Checkout private bot
@@ -582,12 +583,14 @@ jobs:
       - name: Run bot in Paper Mode
         id: run_bot
         if: steps.upload_run_marker.outcome == 'success'
-        timeout-minutes: 20
+        # The job-level 360-minute limit should end the run before this step.
+        timeout-minutes: 360
         env:
           API_KEY: ${{ secrets.API_KEY }}
           API_SECRET: ${{ secrets.API_SECRET }}
           ENABLE_LIVE_TRADING: "false"
-          BOT_RUNTIME_MINUTES: "10"
+          # Intentionally longer than the GitHub job limit for forced-stop testing.
+          BOT_RUNTIME_MINUTES: "400"
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
