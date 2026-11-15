@@ -79,6 +79,7 @@ jobs:
           set -euo pipefail
 
           WORKFLOW_PATH=".github/workflows/setup-a.yml"
+          RECOVERY_WORKFLOW_PATH=".github/workflows/manual-recovery.yml"
 
           # Retry read-only GitHub CLI requests for transient API/network errors.
           gh_retry() {
@@ -161,6 +162,18 @@ jobs:
           PREVIOUS_RUN_ID=""
           PREVIOUS_ARTIFACT_NAME=""
           LEGACY_RUN_ID=""
+          MANUAL_RECOVERY="false"
+          RECOVERY_REQUIRED="false"
+          BLOCKED_RUN_ID=""
+          BLOCKED_CREATED_AT=""
+
+          CURRENT_RUN_CREATED_AT="$(printf '%s' "$RUNS_JSON" | jq -r \
+            --arg current "$GITHUB_RUN_ID" \
+            '[.[].workflow_runs[]? | select((.id | tostring) == $current) | .created_at][0] // empty')"
+          if [[ -z "$CURRENT_RUN_CREATED_AT" ]]; then
+            CURRENT_RUN_CREATED_AT="$(gh_retry api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" | jq -r '.created_at')"
+          fi
 
           # A GitHub re-run keeps the same run ID. Inspect artifacts from
           # earlier attempts of this very run before looking at older run IDs.
@@ -184,28 +197,94 @@ jobs:
             any(.artifacts[]?; .name == "xaut-run-started")
           ')"
 
+          # A manual approval is a deliberate override for one exact blocked run.
+          # Check for it before preferring a checkpoint artifact that may exist but be corrupt.
+          TARGET_BLOCKED_RUN_ID=""
+          TARGET_BLOCKED_CREATED_AT=""
+          if [[ "$CURRENT_MARKER_ATTEMPT_MAX" -gt 0 || "$CURRENT_FIXED_MARKER" == "true" ]]; then
+            TARGET_BLOCKED_RUN_ID="$GITHUB_RUN_ID"
+            TARGET_BLOCKED_CREATED_AT="$CURRENT_RUN_CREATED_AT"
+          elif [[ "${#PREVIOUS_RUN_IDS[@]}" -gt 0 ]]; then
+            for CANDIDATE_BLOCKED_ID in "${PREVIOUS_RUN_IDS[@]}"; do
+              CANDIDATE_BLOCKED_ARTIFACTS="$(gh_retry api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_BLOCKED_ID}/artifacts?per_page=100")"
+              CANDIDATE_BLOCKED_TITLE="$(printf '%s' "$RUNS_JSON" | jq -r --arg id "$CANDIDATE_BLOCKED_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id) | (.display_title // .name // "")][0] // empty')"
+              if printf '%s' "$CANDIDATE_BLOCKED_ARTIFACTS" | jq -e '
+                any(.artifacts[]?; ((.name | test("^xaut-run-started-a[0-9]+$")) or .name == "xaut-run-started") and .expired == false)
+              ' >/dev/null || [[ "$CANDIDATE_BLOCKED_TITLE" == *"Paper State v2"* ]]; then
+                TARGET_BLOCKED_RUN_ID="$CANDIDATE_BLOCKED_ID"
+                TARGET_BLOCKED_CREATED_AT="$(printf '%s' "$RUNS_JSON" | jq -r --arg id "$TARGET_BLOCKED_RUN_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id) | .created_at][0] // empty')"
+                break
+              fi
+            done
+          fi
+
+          if [[ -n "$TARGET_BLOCKED_RUN_ID" && -n "$TARGET_BLOCKED_CREATED_AT" ]]; then
+            APPROVED_RECOVERY_IDS="$(printf '%s' "$RUNS_JSON" | jq -r \
+              --arg recovery_workflow "$RECOVERY_WORKFLOW_PATH" \
+              --arg branch "$GITHUB_REF_NAME" \
+              --arg blocked_at "$TARGET_BLOCKED_CREATED_AT" '
+                [.[].workflow_runs[]?
+                 | select(.head_branch == $branch)
+                 | select(.event == "workflow_dispatch")
+                 | select(.status == "completed" and .conclusion == "success")
+                 | select(((.path // "") | split("@")[0]) == $recovery_workflow)
+                 | select(.created_at > $blocked_at)]
+                | sort_by(.created_at, .id)
+                | reverse
+                | .[].id
+              ')"
+            if [[ -n "$APPROVED_RECOVERY_IDS" ]]; then
+              while IFS= read -r APPROVED_RECOVERY_ID; do
+                [[ -n "$APPROVED_RECOVERY_ID" ]] || continue
+                APPROVED_RECOVERY_ARTIFACTS="$(gh_retry api --method GET \
+                  "repos/${GITHUB_REPOSITORY}/actions/runs/${APPROVED_RECOVERY_ID}/artifacts?per_page=100")"
+                APPROVED_RECOVERY_ATTEMPT="$(printf '%s' "$RUNS_JSON" | jq -r --arg id "$APPROVED_RECOVERY_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id) | .run_attempt][0] // empty')"
+                APPROVED_RECOVERY_ARTIFACT_NAME="xaut-manual-recovery-approved-a${APPROVED_RECOVERY_ATTEMPT}"
+                if printf '%s' "$APPROVED_RECOVERY_ARTIFACTS" | jq -e --arg run "$APPROVED_RECOVERY_ID" --arg name "$APPROVED_RECOVERY_ARTIFACT_NAME" '
+                  any(.artifacts[]?; .name == $name and .expired == false and (.workflow_run.id | tostring) == $run)
+                ' >/dev/null; then
+                  PREVIOUS_RUN_ID="$APPROVED_RECOVERY_ID"
+                  PREVIOUS_ARTIFACT_NAME="$APPROVED_RECOVERY_ARTIFACT_NAME"
+                  MANUAL_RECOVERY="true"
+                  BLOCKED_RUN_ID="$TARGET_BLOCKED_RUN_ID"
+                  BLOCKED_CREATED_AT="$TARGET_BLOCKED_CREATED_AT"
+                  echo "Using explicit manual-recovery approval for blocked Setup A run ${BLOCKED_RUN_ID}."
+                  break
+                fi
+              done <<< "$APPROVED_RECOVERY_IDS"
+            fi
+          fi
+
+          if [[ "$MANUAL_RECOVERY" != "true" ]]; then
           if [[ "$CURRENT_MARKER_ATTEMPT_MAX" -gt "$CURRENT_STATE_ATTEMPT_MAX" ]]; then
-            echo "::error::This run has a previous attempt that started the bot but did not save a checkpoint."
-            echo "::error::Do not re-run against an older state; manual recovery is required."
-            exit 1
+            echo "::warning::This run has a previous attempt that started the bot but did not save a checkpoint."
+            RECOVERY_REQUIRED="true"
+            BLOCKED_RUN_ID="$GITHUB_RUN_ID"
+            BLOCKED_CREATED_AT="$CURRENT_RUN_CREATED_AT"
           elif [[ "$CURRENT_STATE_ATTEMPT_MAX" -gt 0 ]]; then
             if [[ "$CURRENT_MARKER_ATTEMPT_MAX" -ne "$CURRENT_STATE_ATTEMPT_MAX" ]]; then
-              echo "::error::Current-run checkpoint and start-marker attempts do not match."
-              exit 1
+              echo "::warning::Current-run checkpoint and start-marker attempts do not match."
+              RECOVERY_REQUIRED="true"
+              BLOCKED_RUN_ID="$GITHUB_RUN_ID"
+              BLOCKED_CREATED_AT="$CURRENT_RUN_CREATED_AT"
+            else
+              PREVIOUS_RUN_ID="$GITHUB_RUN_ID"
+              PREVIOUS_ARTIFACT_NAME="xaut-paper-state-a${CURRENT_STATE_ATTEMPT_MAX}"
+              echo "Re-running this GitHub run; restoring its latest complete attempt ${CURRENT_STATE_ATTEMPT_MAX}."
             fi
-            PREVIOUS_RUN_ID="$GITHUB_RUN_ID"
-            PREVIOUS_ARTIFACT_NAME="xaut-paper-state-a${CURRENT_STATE_ATTEMPT_MAX}"
-            echo "Re-running this GitHub run; restoring its latest complete attempt ${CURRENT_STATE_ATTEMPT_MAX}."
           elif [[ "$CURRENT_FIXED_STATE" == "true" ]]; then
             PREVIOUS_RUN_ID="$GITHUB_RUN_ID"
             PREVIOUS_ARTIFACT_NAME="xaut-paper-state"
             echo "Re-running a legacy attempt; restoring its fixed-name state artifact."
           elif [[ "$CURRENT_FIXED_MARKER" == "true" ]]; then
-            echo "::error::This run has a legacy start marker but no matching state artifact."
-            exit 1
+            echo "::warning::This run has a legacy start marker but no matching state artifact."
+            RECOVERY_REQUIRED="true"
+            BLOCKED_RUN_ID="$GITHUB_RUN_ID"
+            BLOCKED_CREATED_AT="$CURRENT_RUN_CREATED_AT"
           fi
 
-          if [[ -z "$PREVIOUS_RUN_ID" ]]; then
+          if [[ -z "$PREVIOUS_RUN_ID" && "$RECOVERY_REQUIRED" != "true" ]]; then
             for RUN_ID in "${PREVIOUS_RUN_IDS[@]}"; do
               RUN_TITLE="$(printf '%s' "$RUNS_JSON" | jq -r \
                 --arg id "$RUN_ID" '
@@ -239,13 +318,18 @@ jobs:
               ')"
 
               if [[ "$MARKER_ATTEMPT_MAX" -gt "$STATE_ATTEMPT_MAX" ]]; then
-                echo "::error::Run ${RUN_ID} has a bot-started attempt without a verified state artifact."
-                echo "::error::Refusing to restore an older state or silently reset Paper state."
-                exit 1
+                echo "::warning::Run ${RUN_ID} has a bot-started attempt without a verified state artifact."
+                RECOVERY_REQUIRED="true"
+                BLOCKED_RUN_ID="$RUN_ID"
+                BLOCKED_CREATED_AT="$(printf '%s' "$RUNS_JSON" | jq -r --arg id "$RUN_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id) | .created_at][0] // empty')"
+                break
               elif [[ "$STATE_ATTEMPT_MAX" -gt 0 ]]; then
                 if [[ "$MARKER_ATTEMPT_MAX" -ne "$STATE_ATTEMPT_MAX" ]]; then
-                  echo "::error::Run ${RUN_ID} checkpoint/start-marker attempts do not match."
-                  exit 1
+                  echo "::warning::Run ${RUN_ID} checkpoint/start-marker attempts do not match."
+                  RECOVERY_REQUIRED="true"
+                  BLOCKED_RUN_ID="$RUN_ID"
+                  BLOCKED_CREATED_AT="$(printf '%s' "$RUNS_JSON" | jq -r --arg id "$RUN_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id) | .created_at][0] // empty')"
+                  break
                 fi
                 PREVIOUS_RUN_ID="$RUN_ID"
                 PREVIOUS_ARTIFACT_NAME="xaut-paper-state-a${STATE_ATTEMPT_MAX}"
@@ -263,16 +347,21 @@ jobs:
               # The fixed-name marker belongs to an earlier v3 prototype. A
               # marker without a fixed-name state artifact is ambiguous.
               if [[ "$HAS_START_MARKER" == "true" ]]; then
-                echo "::error::Run ${RUN_ID} has a legacy bot-start marker but no usable state checkpoint."
-                exit 1
+                echo "::warning::Run ${RUN_ID} has a legacy bot-start marker but no usable state checkpoint."
+                RECOVERY_REQUIRED="true"
+                BLOCKED_RUN_ID="$RUN_ID"
+                BLOCKED_CREATED_AT="$(printf '%s' "$RUNS_JSON" | jq -r --arg id "$RUN_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id) | .created_at][0] // empty')"
+                break
               fi
 
               # Older v2 workflows had no start marker. Missing/expired state for
-              # such a run is ambiguous, so do not guess that it failed pre-start.
+              # such a run is ambiguous and must be explicitly recovered.
               if [[ "$RUN_TITLE" == *"Paper State v2"* ]]; then
-                echo "::error::Previous Paper State v2 run ${RUN_ID} has no usable state artifact."
-                echo "::error::Manual state recovery is required; no flat reset will be created."
-                exit 1
+                echo "::warning::Previous Paper State v2 run ${RUN_ID} has no usable state artifact."
+                RECOVERY_REQUIRED="true"
+                BLOCKED_RUN_ID="$RUN_ID"
+                BLOCKED_CREATED_AT="$(printf '%s' "$RUNS_JSON" | jq -r --arg id "$RUN_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id) | .created_at][0] // empty')"
+                break
               fi
 
               if [[ "$RUN_TITLE" == *"Paper State v3"* ]]; then
@@ -286,14 +375,218 @@ jobs:
               fi
             done
           fi
+          fi # end normal previous-state selection; an approved recovery takes precedence
+
+          if [[ "$RECOVERY_REQUIRED" == "true" && "$MANUAL_RECOVERY" != "true" ]]; then
+            if [[ -z "$BLOCKED_RUN_ID" || -z "$BLOCKED_CREATED_AT" ]]; then
+              echo "::error::Could not identify the exact blocked Setup A run; manual recovery cannot be applied."
+              exit 1
+            fi
+            RECOVERY_RUN_IDS_TEXT="$(printf '%s' "$RUNS_JSON" | jq -r \
+              --arg recovery_workflow "$RECOVERY_WORKFLOW_PATH" \
+              --arg branch "$GITHUB_REF_NAME" \
+              --arg blocked_at "$BLOCKED_CREATED_AT" '
+                [.[].workflow_runs[]?
+                 | select(.head_branch == $branch)
+                 | select(.event == "workflow_dispatch")
+                 | select(.status == "completed" and .conclusion == "success")
+                 | select(((.path // "") | split("@")[0]) == $recovery_workflow)
+                 | select(.created_at > $blocked_at)]
+                | sort_by(.created_at, .id)
+                | reverse
+                | .[].id
+              ')"
+            RECOVERY_SELECTED="false"
+            if [[ -n "$RECOVERY_RUN_IDS_TEXT" ]]; then
+              while IFS= read -r RECOVERY_RUN_ID; do
+                [[ -n "$RECOVERY_RUN_ID" ]] || continue
+                RECOVERY_ARTIFACTS="$(gh_retry api --method GET \
+                  "repos/${GITHUB_REPOSITORY}/actions/runs/${RECOVERY_RUN_ID}/artifacts?per_page=100")"
+                RECOVERY_ATTEMPT="$(printf '%s' "$RUNS_JSON" | jq -r --arg id "$RECOVERY_RUN_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id) | .run_attempt][0] // empty')"
+                RECOVERY_ARTIFACT_NAME="xaut-manual-recovery-approved-a${RECOVERY_ATTEMPT}"
+                if printf '%s' "$RECOVERY_ARTIFACTS" | jq -e --arg run "$RECOVERY_RUN_ID" --arg name "$RECOVERY_ARTIFACT_NAME" '
+                  any(.artifacts[]?;
+                    .name == $name and
+                    .expired == false and
+                    (.workflow_run.id | tostring) == $run
+                  )
+                ' >/dev/null; then
+                  PREVIOUS_RUN_ID="$RECOVERY_RUN_ID"
+                  PREVIOUS_ARTIFACT_NAME="$RECOVERY_ARTIFACT_NAME"
+                  MANUAL_RECOVERY="true"
+                  RECOVERY_SELECTED="true"
+                  echo "Found a recent manual-recovery approval artifact in run ${RECOVERY_RUN_ID}."
+                  break
+                fi
+              done <<< "$RECOVERY_RUN_IDS_TEXT"
+            fi
+            if [[ "$RECOVERY_SELECTED" != "true" ]]; then
+              echo "::error::Paper checkpoint recovery is blocked for Setup A run ${BLOCKED_RUN_ID}."
+              echo "::error::Run Manual Recovery for this branch, select an older valid Setup A checkpoint, then retry Setup A."
+              exit 1
+            fi
+          fi
 
           if [[ -n "$PREVIOUS_RUN_ID" ]]; then
             RESTORE_DIR="$RUNNER_TEMP/xaut-paper-state-restore"
-            echo "Downloading Paper state from run ${PREVIOUS_RUN_ID}."
+            echo "Downloading Paper state artifact from run ${PREVIOUS_RUN_ID}."
             download_artifact_with_retry "$PREVIOUS_RUN_ID" "$PREVIOUS_ARTIFACT_NAME" "$RESTORE_DIR"
 
-            export RESTORE_RUN_ID="$PREVIOUS_RUN_ID"
-            export RESTORE_ARTIFACT_NAME="$PREVIOUS_ARTIFACT_NAME"
+            RESTORE_RUN_ID="$PREVIOUS_RUN_ID"
+            RESTORE_ARTIFACT_NAME="$PREVIOUS_ARTIFACT_NAME"
+
+            if [[ "$MANUAL_RECOVERY" == "true" ]]; then
+              export RECOVERY_DIR="$RESTORE_DIR"
+              export RECOVERY_RUN_ID="$PREVIOUS_RUN_ID"
+              export BLOCKED_RUN_ID
+              export EXPECTED_REPOSITORY="$GITHUB_REPOSITORY"
+              export EXPECTED_BRANCH="$GITHUB_REF_NAME"
+              export EXPECTED_ARTIFACT_NAME="$PREVIOUS_ARTIFACT_NAME"
+              RECOVERY_RUN_META="$RUNNER_TEMP/xaut-manual-recovery-run.json"
+              export RECOVERY_RUN_META RUNNER_TEMP
+              SOURCE_RUN_META="$RUNNER_TEMP/xaut-manual-recovery-source-run.json"
+              SOURCE_ARTIFACT_META="$RUNNER_TEMP/xaut-manual-recovery-source-artifacts.json"
+              gh_retry api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${PREVIOUS_RUN_ID}" > "$RECOVERY_RUN_META"
+              APPROVAL_SOURCE_RUN_ID="$(jq -r '.source_run_id' "$RESTORE_DIR/manual_recovery_approval.json")"
+              gh_retry api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${APPROVAL_SOURCE_RUN_ID}" > "$SOURCE_RUN_META"
+              gh_retry api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${APPROVAL_SOURCE_RUN_ID}/artifacts?per_page=100" > "$SOURCE_ARTIFACT_META"
+              export SOURCE_RUN_META SOURCE_ARTIFACT_META
+
+              python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          def fail(message):
+              raise SystemExit(f"MANUAL RECOVERY APPROVAL REJECTED: {message}")
+
+          recovery_meta = json.loads(Path(os.environ["RECOVERY_RUN_META"]).read_text(encoding="utf-8"))
+          source_run_id = recovery_meta.get("id")
+          if str(source_run_id) != os.environ["RECOVERY_RUN_ID"]:
+              fail("recovery workflow run ID mismatch")
+          if recovery_meta.get("repository", {}).get("full_name") != os.environ["EXPECTED_REPOSITORY"]:
+              fail("recovery workflow repository mismatch")
+          if recovery_meta.get("head_branch") != os.environ["EXPECTED_BRANCH"]:
+              fail("recovery workflow branch mismatch")
+          if recovery_meta.get("event") != "workflow_dispatch" or recovery_meta.get("status") != "completed" or recovery_meta.get("conclusion") != "success":
+              fail("recovery workflow did not complete successfully")
+          if (recovery_meta.get("path", "").split("@")[0] != ".github/workflows/manual-recovery.yml"):
+              fail("artifact was not created by the approved manual-recovery workflow")
+
+          base = Path(os.environ["RECOVERY_DIR"])
+          approval_path = base / "manual_recovery_approval.json"
+          if approval_path.is_symlink() or not approval_path.is_file():
+              fail("manual_recovery_approval.json is missing or not a regular file")
+          approval = json.loads(approval_path.read_text(encoding="utf-8"))
+          if approval.get("schema_version") != 1 or approval.get("approved") is not True:
+              fail("approval schema/flag is invalid")
+          if approval.get("mode") != "PAPER" or approval.get("symbol") != "XAUTUSD" or int(approval.get("product_id", -1)) != 131253:
+              fail("approval is not for XAUTUSD Paper mode")
+          if approval.get("repository") != os.environ["EXPECTED_REPOSITORY"] or approval.get("target_branch") != os.environ["EXPECTED_BRANCH"]:
+              fail("approval repository/branch mismatch")
+          if str(approval.get("recovery_run_id", "")) != os.environ["RECOVERY_RUN_ID"]:
+              fail("approval does not belong to this recovery workflow run")
+          if str(approval.get("recovery_run_attempt", "")) != str(recovery_meta.get("run_attempt", "")):
+              fail("approval recovery attempt mismatch")
+          if str(approval.get("blocked_run_id", "")) != os.environ["BLOCKED_RUN_ID"]:
+              fail("approval is for a different blocked Setup A run")
+          if approval.get("approved_by") != recovery_meta.get("actor", {}).get("login"):
+              fail("approval actor does not match the GitHub workflow actor")
+          if recovery_meta.get("created_at", "") <= str(approval.get("blocked_run_created_at", "")):
+              fail("recovery approval was not created after the blocked run")
+
+          source_run_id = str(approval.get("source_run_id", ""))
+          source_attempt = str(approval.get("source_run_attempt", ""))
+          source_artifact_name = str(approval.get("source_artifact_name", ""))
+          if not source_run_id.isdigit() or not source_attempt.isdigit():
+              fail("source run ID/attempt is malformed")
+          if source_artifact_name != f"xaut-paper-state-a{source_attempt}":
+              fail("source artifact name does not match source attempt")
+
+          # The approval payload may contain only the original manifest and its declared files.
+          manifest_path = base / "state_manifest.json"
+          if manifest_path.is_symlink() or not manifest_path.is_file():
+              fail("source state manifest is missing")
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          if manifest.get("schema_version") != 1 or manifest.get("mode") != "PAPER":
+              fail("source manifest schema/mode mismatch")
+          if manifest.get("symbol") != "XAUTUSD" or int(manifest.get("product_id", -1)) != 131253:
+              fail("source manifest symbol/product mismatch")
+          source_run = manifest.get("run")
+          if not isinstance(source_run, dict):
+              fail("source manifest run metadata is missing")
+          source_run_meta = json.loads(Path(os.environ["SOURCE_RUN_META"]).read_text(encoding="utf-8"))
+          if str(source_run_meta.get("id", "")) != source_run_id:
+              fail("source GitHub run ID mismatch")
+          if source_run_meta.get("head_sha") != source_run.get("runner_commit_sha"):
+              fail("source manifest runner commit does not match GitHub run metadata")
+          if str(source_run.get("workflow_run_id", "")) != source_run_id or str(source_run.get("workflow_run_attempt", "")) != source_attempt:
+              fail("source manifest run/attempt mismatch")
+          if source_run.get("repository") != os.environ["EXPECTED_REPOSITORY"] or source_run.get("ref_name") != os.environ["EXPECTED_BRANCH"]:
+              fail("source manifest repository/branch mismatch")
+
+          manifest_files = manifest.get("files")
+          approval_files = approval.get("files")
+          allowed = {"paper_state.json", "alert_state.json", "trade_history.csv", "trade_history_legacy.csv", "execution_journal.json"}
+          if not isinstance(manifest_files, dict) or "paper_state.json" not in manifest_files:
+              fail("source manifest does not list paper_state.json")
+          if not set(manifest_files).issubset(allowed):
+              fail("source manifest lists unexpected files")
+          if not isinstance(approval_files, dict):
+              fail("approval file hash map is malformed")
+          expected_names = set(manifest_files) | {"state_manifest.json"}
+          if set(approval_files) != expected_names:
+              fail("approval file set does not match source manifest")
+          for entry in base.rglob("*"):
+              if entry.is_symlink() or not entry.is_file() or entry.parent != base:
+                  fail(f"unexpected nested/non-regular recovery artifact entry: {entry.relative_to(base)}")
+          actual_names = {p.name for p in base.iterdir() if p.is_file()}
+          if actual_names != expected_names | {"manual_recovery_approval.json"}:
+              fail("recovery artifact contains unexpected/missing files")
+          for name, record in approval_files.items():
+              path = base / name
+              if path.is_symlink() or not path.is_file():
+                  fail(f"recovery file missing/not regular: {name}")
+              import hashlib
+              if not isinstance(record, dict) or record.get("sha256") != hashlib.sha256(path.read_bytes()).hexdigest() or int(record.get("size_bytes", -1)) != path.stat().st_size:
+                  fail(f"approval hash/size mismatch: {name}")
+
+          source_copy = Path(os.environ["RUNNER_TEMP"]) / "xaut-manual-recovery-source-checkpoint"
+          if source_copy.exists():
+              import shutil
+              shutil.rmtree(source_copy)
+          source_copy.mkdir(parents=True)
+          for name in expected_names:
+              import shutil
+              shutil.copy2(base / name, source_copy / name)
+
+          print("MANUAL RECOVERY APPROVAL VERIFIED FOR BLOCKED RUN:", os.environ["BLOCKED_RUN_ID"])
+          print("RESTORE SOURCE:", source_run_id, "attempt", source_attempt)
+          PY
+              RESTORE_RUN_ID="$(jq -r '.source_run_id' "$RESTORE_DIR/manual_recovery_approval.json")"
+              RESTORE_ARTIFACT_NAME="$(jq -r '.source_artifact_name' "$RESTORE_DIR/manual_recovery_approval.json")"
+              RESTORE_DIR="$RUNNER_TEMP/xaut-manual-recovery-source-checkpoint"
+
+              jq -e \
+                --arg repo "$GITHUB_REPOSITORY" --arg branch "$GITHUB_REF_NAME" \
+                --arg workflow "$WORKFLOW_PATH" --arg attempt "$(jq -r '.source_run_attempt' "$RUNNER_TEMP/xaut-paper-state-restore/manual_recovery_approval.json")" '
+                  .repository.full_name == $repo and .head_branch == $branch and
+                  .event == "workflow_dispatch" and .status == "completed" and
+                  ((.path // "") | split("@")[0]) == $workflow and
+                  (.run_attempt | tostring) == $attempt
+                ' "$SOURCE_RUN_META" >/dev/null || { echo "::error::Approved source run metadata no longer matches."; exit 1; }
+              jq -e \
+                --arg run "$RESTORE_RUN_ID" \
+                --arg state "$RESTORE_ARTIFACT_NAME" \
+                --arg marker "xaut-run-started-a$(jq -r '.source_run_attempt' "$RUNNER_TEMP/xaut-paper-state-restore/manual_recovery_approval.json")" '
+                  any(.artifacts[]?; .name == $state and .expired == false and (.workflow_run.id | tostring) == $run) and
+                  any(.artifacts[]?; .name == $marker and .expired == false and (.workflow_run.id | tostring) == $run)
+                ' "$SOURCE_ARTIFACT_META" >/dev/null || { echo "::error::Original source checkpoint/marker artifact is no longer available."; exit 1; }
+              echo "Manual recovery approved by $(jq -r '.approved_by' "$RUNNER_TEMP/xaut-paper-state-restore/manual_recovery_approval.json")."
+            fi
+
+            export RESTORE_RUN_ID
+            export RESTORE_ARTIFACT_NAME
 
             python - "$RESTORE_DIR" <<'PY'
           import csv
