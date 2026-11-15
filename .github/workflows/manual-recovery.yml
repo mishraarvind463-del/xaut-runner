@@ -82,6 +82,9 @@ jobs:
           BLOCKED_RUN_ATTEMPT=""
           BLOCKED_CREATED_AT=""
           BLOCKED_ALLOW_SUCCESS="false"
+          LATEST_SUCCESS_CHECKPOINT_RUN_ID=""
+          LATEST_SUCCESS_CHECKPOINT_ATTEMPT=""
+          LATEST_SUCCESS_CHECKPOINT_CREATED_AT=""
           if [[ -n "$SETUP_RUN_IDS" ]]; then
             while IFS= read -r CANDIDATE_RUN_ID; do
               [[ -n "$CANDIDATE_RUN_ID" ]] || continue
@@ -156,6 +159,11 @@ jobs:
               case "$CANDIDATE_CONCLUSION" in
                 failure|cancelled|timed_out) ;;
                 success)
+                  if [[ "$CANDIDATE_ALLOW_SUCCESS" != "true" && "$MARKER_ATTEMPT_MAX" -gt 0 && "$MARKER_ATTEMPT_MAX" -eq "$STATE_ATTEMPT_MAX" && -z "$LATEST_SUCCESS_CHECKPOINT_RUN_ID" ]]; then
+                    LATEST_SUCCESS_CHECKPOINT_RUN_ID="$CANDIDATE_RUN_ID"
+                    LATEST_SUCCESS_CHECKPOINT_ATTEMPT="$CANDIDATE_ATTEMPT"
+                    LATEST_SUCCESS_CHECKPOINT_CREATED_AT="$(printf '%s' "$CANDIDATE_ATTEMPT_JSON" | jq -r '.run_started_at // .created_at // empty')"
+                  fi
                   [[ "$CANDIDATE_ALLOW_SUCCESS" == "true" ]] || continue
                   ;;
                 *) continue ;;
@@ -175,6 +183,10 @@ jobs:
           fi
           [[ -n "$BLOCKED_RUN_JSON" ]] || { echo "::error::No completed Setup A run requiring manual state recovery was found on this branch."; exit 1; }
           BLOCKED_RUN_ID="$(printf '%s' "$BLOCKED_RUN_JSON" | jq -r '.id | tostring')"
+          if [[ -n "$LATEST_SUCCESS_CHECKPOINT_RUN_ID" && -n "$LATEST_SUCCESS_CHECKPOINT_CREATED_AT" && "$LATEST_SUCCESS_CHECKPOINT_CREATED_AT" > "$BLOCKED_CREATED_AT" ]]; then
+            echo "::error::A newer successful Setup A checkpoint exists in run ${LATEST_SUCCESS_CHECKPOINT_RUN_ID}, attempt ${LATEST_SUCCESS_CHECKPOINT_ATTEMPT}. Manual Recovery would roll back newer Paper progress. Run Setup A to restore that checkpoint automatically; do not create a stale rollback approval."
+            exit 1
+          fi
           BLOCKED_ATTEMPT_CONCLUSION="$(printf '%s' "$BLOCKED_ATTEMPT_JSON" | jq -r '.conclusion // ""')"
           printf '%s' "$BLOCKED_ATTEMPT_JSON" | jq -e \
             --arg repo "$GITHUB_REPOSITORY" \
