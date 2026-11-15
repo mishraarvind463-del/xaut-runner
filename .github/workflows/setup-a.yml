@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
 
           WORKFLOW_PATH=".github/workflows/setup-a.yml"
-          RUNS_JSON="$(gh api --paginate --slurp \
+          RUNS_JSON="$(gh api --method GET --paginate --slurp \
             -f "branch=${GITHUB_REF_NAME}" \
             -f "event=workflow_dispatch" \
             -F "per_page=100" \
