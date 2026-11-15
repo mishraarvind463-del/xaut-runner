@@ -76,55 +76,122 @@ jobs:
             | reverse
             | .[].id
           ')"
+
           BLOCKED_RUN_JSON=""
+          BLOCKED_ATTEMPT_JSON=""
+          BLOCKED_RUN_ATTEMPT=""
+          BLOCKED_CREATED_AT=""
+          BLOCKED_ALLOW_SUCCESS="false"
           if [[ -n "$SETUP_RUN_IDS" ]]; then
             while IFS= read -r CANDIDATE_RUN_ID; do
               [[ -n "$CANDIDATE_RUN_ID" ]] || continue
               CANDIDATE_RUN_JSON="$(printf '%s' "$RUNS_JSON" | jq -c --arg id "$CANDIDATE_RUN_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id)][0] // empty')"
               CANDIDATE_TITLE="$(printf '%s' "$CANDIDATE_RUN_JSON" | jq -r '.display_title // .name // ""')"
-              CANDIDATE_RUN_ATTEMPT="$(printf '%s' "$CANDIDATE_RUN_JSON" | jq -r '.run_attempt | tostring')"
-              [[ "$CANDIDATE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || continue
-              CANDIDATE_ATTEMPT_JSON="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/attempts/${CANDIDATE_RUN_ATTEMPT}")"
+              CANDIDATE_LATEST_ATTEMPT="$(printf '%s' "$CANDIDATE_RUN_JSON" | jq -r '.run_attempt | tostring')"
+              [[ "$CANDIDATE_LATEST_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || continue
+
+              CANDIDATE_ARTIFACTS="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/artifacts?per_page=100")"
+              MARKER_ATTEMPT_MAX="$(printf '%s' "$CANDIDATE_ARTIFACTS" | jq -r '
+                [.artifacts[]? | select(.expired == false)
+                 | select(.name | test("^xaut-run-started-a[0-9]+$"))
+                 | (.name | capture("^xaut-run-started-a(?<attempt>[0-9]+)$").attempt | tonumber)]
+                | if length == 0 then 0 else max end
+              ')"
+              STATE_ATTEMPT_MAX="$(printf '%s' "$CANDIDATE_ARTIFACTS" | jq -r '
+                [.artifacts[]? | select(.expired == false)
+                 | select(.name | test("^xaut-paper-state-a[0-9]+$"))
+                 | (.name | capture("^xaut-paper-state-a(?<attempt>[0-9]+)$").attempt | tonumber)]
+                | if length == 0 then 0 else max end
+              ')"
+              HAS_FIXED_MARKER="$(printf '%s' "$CANDIDATE_ARTIFACTS" | jq -r '
+                any(.artifacts[]?; .name == "xaut-run-started" and .expired == false)
+              ')"
+              HAS_FIXED_STATE="$(printf '%s' "$CANDIDATE_ARTIFACTS" | jq -r '
+                any(.artifacts[]?; .name == "xaut-paper-state" and .expired == false)
+              ')"
+
+              CANDIDATE_ATTEMPT=""
+              CANDIDATE_ALLOW_SUCCESS="false"
+              if [[ "$MARKER_ATTEMPT_MAX" -gt 0 || "$STATE_ATTEMPT_MAX" -gt 0 ]]; then
+                if [[ "$MARKER_ATTEMPT_MAX" -gt "$STATE_ATTEMPT_MAX" ]]; then
+                  CANDIDATE_ATTEMPT="$MARKER_ATTEMPT_MAX"
+                else
+                  CANDIDATE_ATTEMPT="$STATE_ATTEMPT_MAX"
+                  # A checkpoint artifact without its matching marker is also
+                  # an explicit Setup A recovery case, even if that attempt succeeded.
+                  if [[ "$STATE_ATTEMPT_MAX" -gt "$MARKER_ATTEMPT_MAX" ]]; then
+                    CANDIDATE_ALLOW_SUCCESS="true"
+                  fi
+                fi
+              elif [[ "$HAS_FIXED_MARKER" == "true" && "$HAS_FIXED_STATE" != "true" ]]; then
+                CANDIDATE_ATTEMPT="1"
+              elif [[ "$CANDIDATE_TITLE" == *"Paper State v2"* && "$HAS_FIXED_STATE" != "true" ]]; then
+                # Legacy v2 runs may have completed successfully but their state
+                # artifact is absent/expired. Setup A treats this as an explicit
+                # recovery case, so Manual Recovery must recognize the same case.
+                CANDIDATE_ATTEMPT="$CANDIDATE_LATEST_ATTEMPT"
+                CANDIDATE_ALLOW_SUCCESS="true"
+              else
+                continue
+              fi
+
+              [[ "$CANDIDATE_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || continue
+              CANDIDATE_ATTEMPT_JSON="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/attempts/${CANDIDATE_ATTEMPT}")"
+              printf '%s' "$CANDIDATE_ATTEMPT_JSON" | jq -e \
+                --arg repo "$GITHUB_REPOSITORY" \
+                --arg branch "$GITHUB_REF_NAME" \
+                --arg workflow "$WORKFLOW_PATH" \
+                --arg attempt "$CANDIDATE_ATTEMPT" '
+                  .repository.full_name == $repo and
+                  .head_branch == $branch and
+                  .event == "workflow_dispatch" and
+                  .status == "completed" and
+                  ((.path // "") | split("@")[0]) == $workflow and
+                  (.run_attempt | tostring) == $attempt
+                ' >/dev/null || {
+                  echo "::error::Could not validate exact Setup A attempt ${CANDIDATE_RUN_ID}/${CANDIDATE_ATTEMPT}."
+                  exit 1
+                }
               CANDIDATE_CONCLUSION="$(printf '%s' "$CANDIDATE_ATTEMPT_JSON" | jq -r '.conclusion // ""')"
               case "$CANDIDATE_CONCLUSION" in
                 failure|cancelled|timed_out) ;;
-                *)
-                  echo "Skipping Setup A run ${CANDIDATE_RUN_ID}, attempt ${CANDIDATE_RUN_ATTEMPT}: conclusion is ${CANDIDATE_CONCLUSION:-unknown}."
-                  continue
+                success)
+                  [[ "$CANDIDATE_ALLOW_SUCCESS" == "true" ]] || continue
                   ;;
+                *) continue ;;
               esac
-              CANDIDATE_ARTIFACTS="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/artifacts?per_page=100")"
-              HAS_START_MARKER="$(printf '%s' "$CANDIDATE_ARTIFACTS" | jq -r \
-                --arg marker "xaut-run-started-a${CANDIDATE_RUN_ATTEMPT}" \
-                --argjson attempt "$CANDIDATE_RUN_ATTEMPT" '
-                  any(.artifacts[]?; .name == $marker and .expired == false) or
-                  ($attempt == 1 and any(.artifacts[]?; .name == "xaut-run-started" and .expired == false))
-                ')"
-              if [[ "$HAS_START_MARKER" == "true" || "$CANDIDATE_TITLE" == *"Paper State v2"* ]]; then
-                BLOCKED_RUN_JSON="$CANDIDATE_RUN_JSON"
-                BLOCKED_ARTIFACTS="$CANDIDATE_ARTIFACTS"
-                break
-              fi
+
+              BLOCKED_RUN_JSON="$CANDIDATE_RUN_JSON"
+              BLOCKED_ATTEMPT_JSON="$CANDIDATE_ATTEMPT_JSON"
+              BLOCKED_RUN_ATTEMPT="$CANDIDATE_ATTEMPT"
+              BLOCKED_ALLOW_SUCCESS="$CANDIDATE_ALLOW_SUCCESS"
+              BLOCKED_CREATED_AT="$(printf '%s' "$CANDIDATE_ATTEMPT_JSON" | jq -r '.run_started_at // .created_at // empty')"
+              [[ -n "$BLOCKED_CREATED_AT" ]] || {
+                echo "::error::The exact blocked attempt has no usable start timestamp."
+                exit 1
+              }
+              break
             done <<< "$SETUP_RUN_IDS"
           fi
           [[ -n "$BLOCKED_RUN_JSON" ]] || { echo "::error::No completed Setup A run requiring manual state recovery was found on this branch."; exit 1; }
           BLOCKED_RUN_ID="$(printf '%s' "$BLOCKED_RUN_JSON" | jq -r '.id | tostring')"
-          BLOCKED_CREATED_AT="$(printf '%s' "$BLOCKED_RUN_JSON" | jq -r '.created_at')"
-          BLOCKED_RUN_ATTEMPT="$(printf '%s' "$BLOCKED_RUN_JSON" | jq -r '.run_attempt | tostring')"
-          BLOCKED_ATTEMPT_JSON="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${BLOCKED_RUN_ID}/attempts/${BLOCKED_RUN_ATTEMPT}")"
+          BLOCKED_ATTEMPT_CONCLUSION="$(printf '%s' "$BLOCKED_ATTEMPT_JSON" | jq -r '.conclusion // ""')"
           printf '%s' "$BLOCKED_ATTEMPT_JSON" | jq -e \
             --arg repo "$GITHUB_REPOSITORY" \
             --arg branch "$GITHUB_REF_NAME" \
             --arg workflow "$WORKFLOW_PATH" \
-            --arg attempt "$BLOCKED_RUN_ATTEMPT" '
+            --arg attempt "$BLOCKED_RUN_ATTEMPT" \
+            --arg conclusion "$BLOCKED_ATTEMPT_CONCLUSION" \
+            --arg allow_success "$BLOCKED_ALLOW_SUCCESS" '
               .repository.full_name == $repo and
               .head_branch == $branch and
               .event == "workflow_dispatch" and
               .status == "completed" and
               ((.path // "") | split("@")[0]) == $workflow and
               (.run_attempt | tostring) == $attempt and
-              (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out")
-            ' >/dev/null || { echo "::error::The selected blocked attempt did not validate as a failed Setup A attempt."; exit 1; }
+              ((.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out") or
+               ($allow_success == "true" and .conclusion == "success"))
+            ' >/dev/null || { echo "::error::The selected blocked attempt did not validate as an eligible completed Setup A attempt."; exit 1; }
 
           [[ "$SOURCE_RUN_ID" != "$BLOCKED_RUN_ID" ]] || { echo "::error::Choose an older source run, not the blocked run itself."; exit 1; }
 
@@ -143,7 +210,7 @@ jobs:
               .status == "completed" and
               ((.path // "") | split("@")[0]) == $workflow and
               (.run_attempt | tostring) == $attempt and
-              (.created_at < $blocked_at)
+              ((.run_started_at // .created_at // "") < $blocked_at)
             ' >/dev/null || {
               echo "::error::Source must be an older, completed Setup A run on this same branch, with the exact selected attempt."
               exit 1
