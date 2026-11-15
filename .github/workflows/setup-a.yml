@@ -270,6 +270,22 @@ jobs:
               ')"
               CANDIDATE_BLOCKED_TITLE="$(printf '%s' "$CANDIDATE_BLOCKED_META" | jq -r '.display_title // .name // ""')"
 
+              # PREVIOUS_RUN_IDS is newest-first. A complete checkpoint from a
+              # newer run supersedes every older blocked run and every older
+              # manual-recovery approval. Do not let stale recovery approvals
+              # roll the bot back behind a later successful checkpoint.
+              if [[ "$CANDIDATE_STATE_ATTEMPT_MAX" -gt 0 && \
+                    "$CANDIDATE_STATE_ATTEMPT_MAX" -eq "$CANDIDATE_MARKER_ATTEMPT_MAX" ]]; then
+                echo "Newer complete checkpoint found in run ${CANDIDATE_BLOCKED_ID}, attempt ${CANDIDATE_STATE_ATTEMPT_MAX}; older blocked runs will not override it."
+                break
+              fi
+              if [[ "$CANDIDATE_STATE_ATTEMPT_MAX" -eq 0 && \
+                    "$CANDIDATE_MARKER_ATTEMPT_MAX" -eq 0 && \
+                    "$CANDIDATE_HAS_FIXED_STATE" == "true" ]]; then
+                echo "Newer legacy checkpoint found in run ${CANDIDATE_BLOCKED_ID}; older blocked runs will not override it."
+                break
+              fi
+
               CANDIDATE_BLOCKED_RUN_ATTEMPT=""
               CANDIDATE_ALLOW_SUCCESS="false"
               if [[ "$CANDIDATE_MARKER_ATTEMPT_MAX" -gt 0 || "$CANDIDATE_STATE_ATTEMPT_MAX" -gt 0 ]]; then
@@ -1073,7 +1089,7 @@ jobs:
           API_SECRET: ${{ secrets.API_SECRET }}
           ENABLE_LIVE_TRADING: "false"
           # Temporary fast test setting. Change to 350 only after all takeover tests pass.
-          BOT_RUNTIME_MINUTES: "15"
+          BOT_RUNTIME_MINUTES: "5"
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
