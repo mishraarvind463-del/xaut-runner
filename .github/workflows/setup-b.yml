@@ -1,18 +1,39 @@
 name: Setup B
+run-name: Setup B - Paper State v4
 
 on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
+
+# A and B (and Manual Recovery) must use this exact same group.
+# queue:max prevents a newly dispatched workflow from silently replacing an
+# already-pending handover. No workflow is allowed to cancel the running bot.
+concurrency:
+  group: xaut-trading-bot-${{ github.repository }}
+  queue: max
+  cancel-in-progress: false
 
 jobs:
   runner:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
 
     steps:
+      - name: Checkout runner repository
+        uses: actions/checkout@v7
+        timeout-minutes: 10
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
       - name: Checkout private bot
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        timeout-minutes: 10
         with:
           repository: mishraarvind463-del/xaut-bot
           token: ${{ secrets.BOT_REPO_TOKEN }}
@@ -20,12 +41,195 @@ jobs:
           persist-credentials: false
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
+        timeout-minutes: 10
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
-      - name: Install dependencies
-        run: pip install -r private-bot/requirements.txt
+      - name: Clear workspace runtime state before restore
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          runtime_files = [
+              "paper_state.json", "alert_state.json", "trade_history.csv",
+              "trade_history_legacy.csv", "execution_journal.json",
+              "state_manifest.json", "paper_state.json.tmp", "alert_state.json.tmp",
+              "trade_history.csv.tmp", "trade_history_legacy.csv.tmp",
+              "execution_journal.json.tmp", "state_manifest.json.tmp",
+          ]
+          for name in runtime_files:
+              path = Path(name)
+              if path.is_symlink() or path.is_file():
+                  path.unlink()
+              elif path.exists():
+                  raise SystemExit(f"Unexpected directory at runtime-state path: {name}")
+          print("Workspace runtime state cleared before restore.")
+          PY
 
-      - name: Check bot syntax
-        run: python -m py_compile private-bot/bot.py
+      - name: Restore latest verified Paper checkpoint from Setup A or B
+        timeout-minutes: 15
+        run: python scripts/xaut_ci.py restore --workspace .
+
+      - name: Install private bot dependencies
+        timeout-minutes: 10
+        run: python -m pip install --disable-pip-version-check -r private-bot/requirements.txt
+
+      - name: Compile bot and workflow helper
+        timeout-minutes: 2
+        run: python -m py_compile private-bot/bot.py scripts/xaut_ci.py
+
+      - name: Verify graceful shutdown support
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q "SIGTERM" private-bot/bot.py
+          grep -q "def shutdown_bot" private-bot/bot.py
+          grep -q "def write_state_manifest" private-bot/bot.py
+          echo "Graceful shutdown and checkpoint functions are present."
+
+      - name: Run mocked API failure and order-safety simulations
+        timeout-minutes: 3
+        run: python tests/test_api_safety_simulation.py private-bot/bot.py
+
+      - name: Run isolated forced-interruption simulation
+        timeout-minutes: 3
+        run: python tests/test_forced_interruption_simulation.py private-bot/bot.py
+
+      - name: Run isolated A/B handover simulation
+        timeout-minutes: 3
+        run: python tests/test_handover_simulation.py private-bot/bot.py scripts/xaut_ci.py
+
+      - name: Record private bot source revision
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          BOT_SHA="$(git -C private-bot rev-parse HEAD)"
+          echo "BOT_COMMIT_SHA=${BOT_SHA}" >> "$GITHUB_ENV"
+          {
+            echo "### Source revisions"
+            echo "Runner commit: \`${GITHUB_SHA}\`"
+            echo "Private bot commit: \`${BOT_SHA}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Detect runner public IPv4
+        id: runner_ip
+        timeout-minutes: 7
+        shell: bash
+        run: |
+          set -euo pipefail
+          IP=""
+          for attempt in 1 2 3 4 5; do
+            if IP="$(curl -4 -fsS --connect-timeout 10 --max-time 20 \
+              --retry 2 --retry-all-errors --retry-delay 2 https://api.ipify.org)"; then
+              if python -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$IP" 2>/dev/null; then
+                break
+              fi
+            fi
+            IP=""
+            echo "Public-IP lookup failed (attempt ${attempt}/5); retrying."
+            sleep 3
+          done
+          [[ -n "$IP" ]] || { echo "::error::Could not detect a valid runner IPv4 address."; exit 1; }
+          echo "Runner public IP: ${IP}"
+          echo "ip=${IP}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Delta Exchange IP whitelist"
+            echo "Add this runner IPv4 address to the Delta API key whitelist: \`${IP}\`."
+            echo "A signed, read-only Delta API probe runs after the 90-second manual whitelist window."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Wait for manual Delta IP whitelist update
+        timeout-minutes: 3
+        run: |
+          echo "Add the runner IP shown in the previous step to the Delta Exchange API whitelist."
+          echo "Waiting 90 seconds, then verifying whitelist access with signed read-only API calls."
+          sleep 90
+
+      - name: Verify Delta credentials and IP whitelist using read-only APIs
+        id: whitelist_probe
+        timeout-minutes: 5
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+          API_SECRET: ${{ secrets.API_SECRET }}
+          ENABLE_LIVE_TRADING: "false"
+          PYTHONPATH: private-bot
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import bot
+          bot.PAPER_MODE = True
+          bot.validate_configuration()
+          bot.validate_product_identity()
+          position = bot.get_position()  # signed GET; never sends or cancels an order
+          print("DELTA WHITELIST PROBE PASSED: authenticated read-only position API returned", position)
+          print("PAPER MODE CONFIRMED; no order endpoint was called.")
+          PY
+
+      - name: Prepare Setup B bot-start marker
+        id: prepare_run_marker
+        if: steps.whitelist_probe.outcome == 'success'
+        timeout-minutes: 2
+        run: python scripts/xaut_ci.py marker --runner-kind b --output "${{ runner.temp }}/xaut-run-started.json"
+
+      - name: Upload Setup B bot-start marker
+        id: upload_run_marker
+        if: steps.prepare_run_marker.outcome == 'success'
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v7
+        with:
+          name: xaut-run-started-b${{ github.run_attempt }}
+          path: ${{ runner.temp }}/xaut-run-started.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Run bot in Paper Mode
+        id: run_bot
+        if: steps.upload_run_marker.outcome == 'success'
+        timeout-minutes: 25
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+          API_SECRET: ${{ secrets.API_SECRET }}
+          ENABLE_LIVE_TRADING: "false"
+          BOT_RUNTIME_MINUTES: "5"
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_USE_SSL: ${{ secrets.SMTP_USE_SSL || 'false' }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+          ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM || secrets.SMTP_USER }}
+          BOT_COMMIT_SHA: ${{ env.BOT_COMMIT_SHA }}
+        run: python -u private-bot/bot.py
+
+      - name: Validate and stage end-of-run Paper checkpoint
+        id: checkpoint
+        if: always() && steps.upload_run_marker.outcome == 'success'
+        timeout-minutes: 5
+        env:
+          RUNNER_KIND: "b"
+        run: python scripts/xaut_ci.py checkpoint --marker "${{ runner.temp }}/xaut-run-started.json" --output state-artifact
+
+      - name: Upload verified Setup B Paper checkpoint
+        id: upload_checkpoint
+        if: always() && steps.checkpoint.outcome == 'success'
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v7
+        with:
+          name: xaut-paper-state-b${{ github.run_attempt }}
+          path: state-artifact/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Verify uploaded Setup B checkpoint is visible
+        if: always() && steps.upload_checkpoint.outcome == 'success'
+        timeout-minutes: 5
+        env:
+          EXPECTED_ARTIFACT_ID: ${{ steps.upload_checkpoint.outputs.artifact-id }}
+          EXPECTED_ARTIFACT_NAME: xaut-paper-state-b${{ github.run_attempt }}
+        run: python scripts/xaut_ci.py verify-upload
