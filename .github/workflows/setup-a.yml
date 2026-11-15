@@ -21,7 +21,7 @@ jobs:
       API_KEY: ${{ secrets.API_KEY }}
       API_SECRET: ${{ secrets.API_SECRET }}
       ENABLE_LIVE_TRADING: "false"
-      BOT_RUNTIME_MINUTES: "30"
+      BOT_RUNTIME_MINUTES: "10"
 
     steps:
       - name: Checkout private bot
@@ -48,17 +48,16 @@ jobs:
                 .workflow_runs[]
                 | select(
                     (.path | split("@")[0])
-                    == ".github/workflows/Setup-a.yml"
+                    == ".github/workflows/setup-a.yml"
                   )
                 | select((.id | tostring) != $current)
                 | select(.status == "completed")
-                | select(.conclusion == "success")
               ]
               | if length > 0 then .[0].id else "" end
             ')"
 
           if [[ -z "$PREVIOUS_RUN_ID" ]]; then
-            echo "No previous successful Setup A run."
+            echo "No previous completed Setup A run."
             echo "Starting first Paper state."
             exit 0
           fi
@@ -79,7 +78,7 @@ jobs:
             )
           ' >/dev/null; then
 
-            echo "Restoring Paper state from run ${PREVIOUS_RUN_ID}"
+            echo "Restoring Paper state from completed run ${PREVIOUS_RUN_ID}"
 
             gh run download "$PREVIOUS_RUN_ID" \
               --repo "$GITHUB_REPOSITORY" \
