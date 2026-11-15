@@ -82,10 +82,24 @@ jobs:
               [[ -n "$CANDIDATE_RUN_ID" ]] || continue
               CANDIDATE_RUN_JSON="$(printf '%s' "$RUNS_JSON" | jq -c --arg id "$CANDIDATE_RUN_ID" '[.[].workflow_runs[]? | select((.id | tostring) == $id)][0] // empty')"
               CANDIDATE_TITLE="$(printf '%s' "$CANDIDATE_RUN_JSON" | jq -r '.display_title // .name // ""')"
+              CANDIDATE_RUN_ATTEMPT="$(printf '%s' "$CANDIDATE_RUN_JSON" | jq -r '.run_attempt | tostring')"
+              [[ "$CANDIDATE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || continue
+              CANDIDATE_ATTEMPT_JSON="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/attempts/${CANDIDATE_RUN_ATTEMPT}")"
+              CANDIDATE_CONCLUSION="$(printf '%s' "$CANDIDATE_ATTEMPT_JSON" | jq -r '.conclusion // ""')"
+              case "$CANDIDATE_CONCLUSION" in
+                failure|cancelled|timed_out) ;;
+                *)
+                  echo "Skipping Setup A run ${CANDIDATE_RUN_ID}, attempt ${CANDIDATE_RUN_ATTEMPT}: conclusion is ${CANDIDATE_CONCLUSION:-unknown}."
+                  continue
+                  ;;
+              esac
               CANDIDATE_ARTIFACTS="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/artifacts?per_page=100")"
-              HAS_START_MARKER="$(printf '%s' "$CANDIDATE_ARTIFACTS" | jq -r '
-                any(.artifacts[]?; ((.name | test("^xaut-run-started-a[0-9]+$")) or .name == "xaut-run-started") and .expired == false)
-              ')"
+              HAS_START_MARKER="$(printf '%s' "$CANDIDATE_ARTIFACTS" | jq -r \
+                --arg marker "xaut-run-started-a${CANDIDATE_RUN_ATTEMPT}" \
+                --argjson attempt "$CANDIDATE_RUN_ATTEMPT" '
+                  any(.artifacts[]?; .name == $marker and .expired == false) or
+                  ($attempt == 1 and any(.artifacts[]?; .name == "xaut-run-started" and .expired == false))
+                ')"
               if [[ "$HAS_START_MARKER" == "true" || "$CANDIDATE_TITLE" == *"Paper State v2"* ]]; then
                 BLOCKED_RUN_JSON="$CANDIDATE_RUN_JSON"
                 BLOCKED_ARTIFACTS="$CANDIDATE_ARTIFACTS"
@@ -97,10 +111,24 @@ jobs:
           BLOCKED_RUN_ID="$(printf '%s' "$BLOCKED_RUN_JSON" | jq -r '.id | tostring')"
           BLOCKED_CREATED_AT="$(printf '%s' "$BLOCKED_RUN_JSON" | jq -r '.created_at')"
           BLOCKED_RUN_ATTEMPT="$(printf '%s' "$BLOCKED_RUN_JSON" | jq -r '.run_attempt | tostring')"
+          BLOCKED_ATTEMPT_JSON="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${BLOCKED_RUN_ID}/attempts/${BLOCKED_RUN_ATTEMPT}")"
+          printf '%s' "$BLOCKED_ATTEMPT_JSON" | jq -e \
+            --arg repo "$GITHUB_REPOSITORY" \
+            --arg branch "$GITHUB_REF_NAME" \
+            --arg workflow "$WORKFLOW_PATH" \
+            --arg attempt "$BLOCKED_RUN_ATTEMPT" '
+              .repository.full_name == $repo and
+              .head_branch == $branch and
+              .event == "workflow_dispatch" and
+              .status == "completed" and
+              ((.path // "") | split("@")[0]) == $workflow and
+              (.run_attempt | tostring) == $attempt and
+              (.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out")
+            ' >/dev/null || { echo "::error::The selected blocked attempt did not validate as a failed Setup A attempt."; exit 1; }
 
           [[ "$SOURCE_RUN_ID" != "$BLOCKED_RUN_ID" ]] || { echo "::error::Choose an older source run, not the blocked run itself."; exit 1; }
 
-          SOURCE_RUN_JSON="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}")"
+          SOURCE_RUN_JSON="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/attempts/${SOURCE_ATTEMPT}")"
           SOURCE_RUN_META="$RUNNER_TEMP/xaut-manual-source-run.json"
           printf '%s' "$SOURCE_RUN_JSON" > "$SOURCE_RUN_META"
           printf '%s' "$SOURCE_RUN_JSON" | jq -e \
@@ -209,8 +237,8 @@ jobs:
           source_run_meta = read_json(Path(os.environ["SOURCE_RUN_META"]))
           if str(source_run_meta.get("id", "")) != os.environ["SOURCE_RUN_ID"]:
               fail("GitHub source run metadata ID mismatch")
-          if source_run_meta.get("head_sha") != run_meta.get("runner_commit_sha"):
-              fail("checkpoint runner commit does not match the selected GitHub source run")
+
+                            fail("checkpoint runner commit does not match the selected GitHub source run")
           if str(run_meta.get("workflow_run_id", "")) != os.environ["SOURCE_RUN_ID"]:
               fail("checkpoint manifest run ID mismatch")
           if str(run_meta.get("workflow_run_attempt", "")) != os.environ["SOURCE_ATTEMPT"]:
@@ -221,8 +249,9 @@ jobs:
               fail("checkpoint manifest branch mismatch")
           if marker.get("workflow_commit") != source_run_meta.get("head_sha"):
               fail("bot-start marker runner commit does not match selected GitHub source run")
-          if marker.get("bot_commit_sha") and run_meta.get("bot_commit_sha") != marker.get("bot_commit_sha"):
-              fail("bot source commit differs between marker and checkpoint manifest")
+          marker_bot_commit = marker.get("bot_commit", "")
+          if not marker_bot_commit or marker_bot_commit != run_meta.get("bot_commit_sha", ""):
+              fail("bot source commit differs between start marker and checkpoint manifest")
 
           records = manifest.get("files")
           if not isinstance(records, dict) or "paper_state.json" not in records:
@@ -377,3 +406,4 @@ jobs:
             echo "The next Setup A run can use this approval only for the exact blocked run recorded above."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "Approved recovery artifact verified and ready for the matching Setup A run."
+          if source_run_meta.get("head_sha") != run_meta.get("runner_commit_sha"):
