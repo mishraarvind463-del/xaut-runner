@@ -180,7 +180,8 @@ jobs:
           CURRENT_ARTIFACTS_JSON="$(gh_retry api --method GET \
             "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100")"
           CURRENT_MARKER_ATTEMPT_MAX="$(printf '%s' "$CURRENT_ARTIFACTS_JSON" | jq -r '
-            [.artifacts[]? | select(.name | test("^xaut-run-started-a[0-9]+$"))
+            [.artifacts[]? | select(.expired == false)
+             | select(.name | test("^xaut-run-started-a[0-9]+$"))
              | (.name | capture("^xaut-run-started-a(?<attempt>[0-9]+)$").attempt | tonumber)]
             | if length == 0 then 0 else max end
           ')"
@@ -194,7 +195,7 @@ jobs:
             any(.artifacts[]?; .name == "xaut-paper-state" and .expired == false)
           ')"
           CURRENT_FIXED_MARKER="$(printf '%s' "$CURRENT_ARTIFACTS_JSON" | jq -r '
-            any(.artifacts[]?; .name == "xaut-run-started")
+            any(.artifacts[]?; .name == "xaut-run-started" and .expired == false)
           ')"
 
           # A manual approval is a deliberate override for one exact blocked run.
@@ -340,7 +341,8 @@ jobs:
                 "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100")"
 
               MARKER_ATTEMPT_MAX="$(printf '%s' "$ARTIFACTS_JSON" | jq -r '
-                [.artifacts[]? | select(.name | test("^xaut-run-started-a[0-9]+$"))
+                [.artifacts[]? | select(.expired == false)
+                 | select(.name | test("^xaut-run-started-a[0-9]+$"))
                  | (.name | capture("^xaut-run-started-a(?<attempt>[0-9]+)$").attempt | tonumber)]
                 | if length == 0 then 0 else max end
               ')"
@@ -354,7 +356,7 @@ jobs:
                 any(.artifacts[]?; .name == "xaut-paper-state" and .expired == false)
               ')"
               HAS_START_MARKER="$(printf '%s' "$ARTIFACTS_JSON" | jq -r '
-                any(.artifacts[]?; .name == "xaut-run-started")
+                any(.artifacts[]?; .name == "xaut-run-started" and .expired == false)
               ')"
               HAS_LEGACY="$(printf '%s' "$ARTIFACTS_JSON" | jq -r '
                 any(.artifacts[]?; .name == "xaut-paper-trade-history" and .expired == false)
