@@ -1,19 +1,27 @@
-name: Manual Recovery - XAUTUSD Paper State
-run-name: Manual Recovery - XAUTUSD Paper State
+name: Manual Recovery - XAUTUSD
+run-name: Manual Recovery - XAUTUSD ${{ inputs.recovery_mode }}
 
 on:
   workflow_dispatch:
     inputs:
-      source_run_id:
-        description: 'Older Setup A run ID that contains the checkpoint you want to restore'
+      recovery_mode:
+        description: "Choose which Setup A state to recover"
         required: true
+        type: choice
+        options:
+          - PAPER
+          - LIVE
+        default: PAPER
+      source_run_id:
+        description: 'Older successful Setup A run ID with the state checkpoint (leave blank for a fresh flat LIVE baseline)'
+        required: false
         type: string
       source_attempt:
-        description: 'Attempt number that created that checkpoint (usually 1)'
-        required: true
+        description: 'Attempt number that created the selected checkpoint (leave blank for a fresh LIVE baseline)'
+        required: false
         type: string
       confirmation:
-        description: 'Type RESTORE_XAUTUSD_PAPER_STATE to approve this Paper-state rollback'
+        description: 'Paper: RESTORE_XAUTUSD_PAPER_STATE | Live: RECOVER_XAUTUSD_LIVE_AFTER_MANUAL_FLAT'
         required: true
         type: string
 
@@ -31,8 +39,9 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Verify selected source and latest blocked run
+      - name: Verify selected source and latest blocked Paper run
         id: verify_source
+        if: ${{ inputs.recovery_mode == 'PAPER' }}
         timeout-minutes: 15
         env:
           GH_TOKEN: ${{ github.token }}
@@ -445,22 +454,389 @@ jobs:
           echo "source_run_id=${SOURCE_RUN_ID}" >> "$GITHUB_OUTPUT"
           echo "source_attempt=${SOURCE_ATTEMPT}" >> "$GITHUB_OUTPUT"
 
+      - name: Checkout private bot for LIVE recovery
+        if: ${{ inputs.recovery_mode == 'LIVE' }}
+        uses: actions/checkout@v7
+        timeout-minutes: 10
+        with:
+          repository: mishraarvind463-del/xaut-bot
+          token: ${{ secrets.BOT_REPO_TOKEN }}
+          path: private-bot
+          persist-credentials: false
+
+      - name: Setup Python for LIVE recovery
+        if: ${{ inputs.recovery_mode == 'LIVE' }}
+        uses: actions/setup-python@v7
+        timeout-minutes: 10
+        with:
+          python-version: "3.12"
+
+      - name: Install bot dependencies for LIVE recovery
+        if: ${{ inputs.recovery_mode == 'LIVE' }}
+        timeout-minutes: 10
+        run: |
+          python -m pip install --upgrade pip --retries 5 --timeout 30
+          python -m pip install --retries 5 --timeout 30 -r private-bot/requirements.txt
+          python -m pip check
+
+      - name: Detect Delta whitelist IP for LIVE recovery
+        if: ${{ inputs.recovery_mode == 'LIVE' }}
+        id: recovery_runner_ip
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          IP="$(curl -4 -fsS --connect-timeout 10 --max-time 20 https://api.ipify.org)"
+          [[ "$IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { echo "::error::Invalid runner public IPv4."; exit 1; }
+          echo "Runner public IP for Delta whitelist: ${IP}"
+          echo "ip=${IP}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for Delta whitelist before LIVE recovery check
+        if: ${{ inputs.recovery_mode == 'LIVE' }}
+        timeout-minutes: 3
+        run: |
+          echo "Whitelist the LIVE recovery runner IP shown above in Delta."
+          sleep 90
+
+      - name: Verify and prepare LIVE manual recovery approval
+        id: verify_live_source
+        if: ${{ inputs.recovery_mode == 'LIVE' }}
+        timeout-minutes: 15
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API_KEY: ${{ secrets.API_KEY }}
+          API_SECRET: ${{ secrets.API_SECRET }}
+          ENABLE_LIVE_TRADING: "true"
+          LIVE_TRADING_CONFIRM: ${{ secrets.LIVE_TRADING_CONFIRM }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_ATTEMPT: ${{ inputs.source_attempt }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import csv
+          import hashlib
+          import json
+          import math
+          import os
+          import re
+          import shutil
+          import subprocess
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path("private-bot").resolve()))
+          import bot
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          branch = os.environ["GITHUB_REF_NAME"]
+          setup_path = ".github/workflows/setup-a.yml"
+          source_id = os.environ.get("SOURCE_RUN_ID", "").strip()
+          source_attempt_raw = os.environ.get("SOURCE_ATTEMPT", "").strip()
+          confirmation = os.environ.get("CONFIRMATION", "")
+          if confirmation != "RECOVER_XAUTUSD_LIVE_AFTER_MANUAL_FLAT":
+              raise SystemExit("LIVE MANUAL RECOVERY BLOCKED: exact LIVE recovery confirmation is required.")
+          bot.validate_configuration()
+          if not os.environ.get("API_KEY") or not os.environ.get("API_SECRET"):
+              raise SystemExit("LIVE MANUAL RECOVERY BLOCKED: API_KEY/API_SECRET are missing.")
+
+          def gh_json(args):
+              return json.loads(subprocess.check_output(["gh", *args], text=True))
+
+          pages = gh_json([
+              "api", "--paginate", "--slurp",
+              "-f", f"branch={branch}", "-f", "event=workflow_dispatch", "-F", "per_page=100",
+              f"repos/{repo}/actions/runs",
+          ])
+          runs = []
+          for page in (pages if isinstance(pages, list) else [pages]):
+              if isinstance(page, dict):
+                  runs.extend(page.get("workflow_runs", []) or [])
+          runs = [r for r in runs if r.get("head_branch") == branch and r.get("event") == "workflow_dispatch"]
+          runs.sort(key=lambda r: (r.get("created_at", ""), int(r.get("id", 0))), reverse=True)
+
+          def run_path(run):
+              return (run.get("path") or "").split("@", 1)[0]
+
+          active = [
+              r for r in runs
+              if run_path(r) == setup_path and r.get("status") != "completed"
+          ]
+          if active:
+              raise SystemExit("LIVE MANUAL RECOVERY BLOCKED: a Setup A run is still active.")
+
+          def artifacts_for(run_id):
+              data = gh_json(["api", f"repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100"])
+              return [a for a in data.get("artifacts", []) if not a.get("expired", False)]
+
+          def max_attempt(artifacts, prefix):
+              rx = re.compile(re.escape(prefix) + r"([0-9]+)")
+              vals = []
+              for art in artifacts:
+                  match = rx.fullmatch(art.get("name", ""))
+                  if match:
+                      vals.append(int(match.group(1)))
+              return max(vals, default=0)
+
+          setup_runs = [r for r in runs if run_path(r) == setup_path]
+          blocked = None
+          for run in setup_runs:
+              arts = artifacts_for(run["id"])
+              marker_attempt = max_attempt(arts, "xaut-live-run-started-a")
+              state_attempt = max_attempt(arts, "xaut-live-state-a")
+              if marker_attempt == 0 and state_attempt == 0:
+                  continue
+              attempt = max(marker_attempt, state_attempt)
+              attempt_meta = gh_json([
+                  "api", f"repos/{repo}/actions/runs/{run['id']}/attempts/{attempt}"
+              ])
+              is_complete = marker_attempt > 0 and marker_attempt == state_attempt
+              is_success = attempt_meta.get("status") == "completed" and attempt_meta.get("conclusion") == "success"
+              if is_complete and is_success:
+                  raise SystemExit(
+                      "LIVE MANUAL RECOVERY NOT NEEDED: latest LIVE Setup A run has a matching successful checkpoint."
+                  )
+              blocked = (run, attempt, attempt_meta)
+              break
+
+          if blocked is None:
+              raise SystemExit("LIVE MANUAL RECOVERY BLOCKED: no interrupted/incomplete LIVE Setup A run was found.")
+
+          blocked_run, blocked_attempt, blocked_meta = blocked
+          blocked_created = blocked_meta.get("run_started_at") or blocked_meta.get("created_at") or blocked_run.get("created_at", "")
+
+          # Independently confirm that the real exchange is flat and has no XAUTUSD open orders.
+          bot.validate_product_identity()
+          exchange_position = bot.read_stable_position()
+          active_orders = bot.get_open_orders()
+          if exchange_position is None or not math.isclose(float(exchange_position), 0.0, abs_tol=bot.POSITION_TOLERANCE):
+              raise SystemExit(
+                  f"LIVE MANUAL RECOVERY BLOCKED: Delta position is not verified zero ({exchange_position}). "
+                  "Close it manually on Delta and retry."
+              )
+          if active_orders is None or active_orders:
+              raise SystemExit(
+                  "LIVE MANUAL RECOVERY BLOCKED: Delta open orders are not verified empty. "
+                  "Resolve them manually on Delta and retry."
+              )
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          approved_dir = workspace / "approved-recovery"
+          if approved_dir.exists():
+              shutil.rmtree(approved_dir)
+          approved_dir.mkdir(parents=True)
+
+          allowed = {
+              "execution_journal.json", "alert_state.json",
+              "trade_history.csv", "trade_history_legacy.csv",
+              "state_manifest.json",
+          }
+
+          def read_json(path):
+              if path.is_symlink() or not path.is_file():
+                  raise SystemExit(f"LIVE MANUAL RECOVERY BLOCKED: missing/unsafe file {path.name}")
+              value = json.loads(path.read_text(encoding="utf-8"))
+              if not isinstance(value, dict):
+                  raise SystemExit(f"LIVE MANUAL RECOVERY BLOCKED: malformed JSON {path.name}")
+              return value
+
+          def validate_source_checkpoint(run, attempt):
+              arts = artifacts_for(run["id"])
+              state_name = f"xaut-live-state-a{attempt}"
+              marker_name = f"xaut-live-run-started-a{attempt}"
+              if not any(a.get("name") == state_name for a in arts) or not any(a.get("name") == marker_name for a in arts):
+                  raise SystemExit("Selected LIVE source run is missing its matching state or start-marker artifact.")
+              meta = gh_json(["api", f"repos/{repo}/actions/runs/{run['id']}/attempts/{attempt}"])
+              if meta.get("status") != "completed" or meta.get("conclusion") != "success":
+                  raise SystemExit("Selected LIVE source attempt must have completed successfully.")
+              if run_path(meta) != setup_path or meta.get("head_branch") != branch or meta.get("event") != "workflow_dispatch":
+                  raise SystemExit("Selected LIVE source attempt is not a Setup A run on this branch.")
+              if (meta.get("run_started_at") or meta.get("created_at") or "") >= blocked_created:
+                  raise SystemExit("Selected LIVE source checkpoint must be older than the interrupted LIVE run.")
+
+              base = Path(os.environ["RUNNER_TEMP"]) / f"live-recovery-source-{run['id']}-{attempt}"
+              marker_dir = Path(os.environ["RUNNER_TEMP"]) / f"live-recovery-marker-{run['id']}-{attempt}"
+              for folder in (base, marker_dir):
+                  if folder.exists():
+                      shutil.rmtree(folder)
+                  folder.mkdir(parents=True)
+              subprocess.check_call(["gh", "run", "download", str(run["id"]), "--repo", repo,
+                                     "--name", state_name, "--dir", str(base)])
+              subprocess.check_call(["gh", "run", "download", str(run["id"]), "--repo", repo,
+                                     "--name", marker_name, "--dir", str(marker_dir)])
+              marker = read_json(marker_dir / "xaut-run-started.json")
+              if (marker.get("mode") != "LIVE"
+                      or str(marker.get("workflow_run_id")) != str(run["id"])
+                      or str(marker.get("workflow_run_attempt")) != str(attempt)
+                      or marker.get("repository") != repo
+                      or marker.get("branch") != branch
+                      or marker.get("workflow_commit") != meta.get("head_sha")):
+                  raise SystemExit("Selected LIVE source start marker did not match its GitHub run.")
+              manifest = read_json(base / "state_manifest.json")
+              if (manifest.get("schema_version") != 1 or manifest.get("mode") != "LIVE"
+                      or manifest.get("symbol") != "XAUTUSD" or int(manifest.get("product_id", -1)) != 131253):
+                  raise SystemExit("Selected LIVE source checkpoint manifest is not a valid XAUTUSD LIVE manifest.")
+              run_meta = manifest.get("run")
+              if (not isinstance(run_meta, dict)
+                      or str(run_meta.get("workflow_run_id")) != str(run["id"])
+                      or str(run_meta.get("workflow_run_attempt")) != str(attempt)
+                      or run_meta.get("repository") != repo
+                      or run_meta.get("ref_name") != branch
+                      or run_meta.get("runner_commit_sha") != meta.get("head_sha")
+                      or not marker.get("bot_commit")
+                      or marker.get("bot_commit") != run_meta.get("bot_commit_sha")):
+                  raise SystemExit("Selected LIVE source checkpoint run/commit metadata did not match.")
+              records = manifest.get("files")
+              if not isinstance(records, dict) or "execution_journal.json" not in records:
+                  raise SystemExit("Selected LIVE source checkpoint has no execution journal.")
+              if not set(records).issubset(allowed - {"state_manifest.json"}):
+                  raise SystemExit("Selected LIVE source checkpoint has unexpected files.")
+              for name, record in records.items():
+                  path = base / name
+                  if path.is_symlink() or not path.is_file() or not isinstance(record, dict):
+                      raise SystemExit(f"Invalid LIVE checkpoint file: {name}")
+                  if hashlib.sha256(path.read_bytes()).hexdigest() != record.get("sha256"):
+                      raise SystemExit(f"LIVE checkpoint SHA-256 mismatch: {name}")
+                  if path.stat().st_size != int(record.get("size_bytes", -1)):
+                      raise SystemExit(f"LIVE checkpoint size mismatch: {name}")
+              journal = read_json(base / "execution_journal.json")
+              if (journal.get("version") != 1 or journal.get("symbol") != "XAUTUSD"
+                      or int(journal.get("product_id", -1)) != 131253
+                      or float(journal.get("managed_position", 999)) != 0
+                      or journal.get("pending_order") is not None):
+                  raise SystemExit("Selected LIVE source execution journal must be flat and have no pending order.")
+              for name in records:
+                  shutil.copy2(base / name, approved_dir / name)
+              shutil.copy2(base / "state_manifest.json", approved_dir / "state_manifest.json")
+              return str(run["id"]), str(attempt), run_meta.get("bot_commit_sha", "")
+
+          if source_id:
+              if not source_id.isdigit() or not source_attempt_raw.isdigit() or int(source_attempt_raw) < 1:
+                  raise SystemExit("Provide both a numeric source_run_id and positive source_attempt, or leave both blank for a fresh flat baseline.")
+              selected = next((r for r in setup_runs if str(r.get("id")) == source_id), None)
+              if selected is None:
+                  raise SystemExit("Selected LIVE source run was not found on this branch.")
+              selected_attempt = int(source_attempt_raw)
+              source_run_id, source_attempt, bot_sha = validate_source_checkpoint(selected, selected_attempt)
+          else:
+              if source_attempt_raw:
+                  raise SystemExit("Leave source_attempt blank when source_run_id is blank.")
+              # A fresh baseline is allowed only after the exchange position/order checks above.
+              journal = bot.default_execution_journal()
+              bot.save_execution_journal(journal)
+              atomic_alert = {"version": 1, "active_incidents": {}, "queue": []}
+              (approved_dir / "execution_journal.json").write_text(
+                  json.dumps(journal, separators=(",", ":")), encoding="utf-8"
+              )
+              (approved_dir / "alert_state.json").write_text(
+                  json.dumps(atomic_alert, separators=(",", ":")), encoding="utf-8"
+              )
+              with (approved_dir / "trade_history.csv").open("w", newline="", encoding="utf-8") as handle:
+                  csv.writer(handle).writerow(bot.TRADE_LOG_FIELDS)
+              source_run_id, source_attempt, bot_sha = "", "", ""
+
+          # Build a manifest for a fresh LIVE baseline. A selected successful source keeps its original manifest.
+          manifest_path = approved_dir / "state_manifest.json"
+          if not manifest_path.exists():
+              records = {}
+              for name in sorted(allowed - {"state_manifest.json"}):
+                  path = approved_dir / name
+                  records[name] = {
+                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                      "size_bytes": path.stat().st_size,
+                  }
+              manifest = {
+                  "schema_version": 1,
+                  "symbol": "XAUTUSD",
+                  "product_id": 131253,
+                  "mode": "LIVE",
+                  "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                  "run": {
+                      "repository": repo,
+                      "ref_name": branch,
+                      "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+                      "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                      "runner_commit_sha": os.environ["GITHUB_SHA"],
+                      "bot_commit_sha": bot_sha or subprocess.check_output(
+                          ["git", "-C", "private-bot", "rev-parse", "HEAD"], text=True
+                      ).strip(),
+                  },
+                  "files": records,
+              }
+              manifest_path.write_text(json.dumps(manifest, separators=(",", ":")), encoding="utf-8")
+
+          # Validate all approved files and create an exact checksum list for Setup A to verify.
+          manifest = read_json(manifest_path)
+          if manifest.get("mode") != "LIVE" or manifest.get("symbol") != "XAUTUSD" or int(manifest.get("product_id", -1)) != 131253:
+              raise SystemExit("Prepared LIVE recovery manifest has incorrect mode/product identity.")
+          journal = read_json(approved_dir / "execution_journal.json")
+          if float(journal.get("managed_position", 999)) != 0 or journal.get("pending_order") is not None:
+              raise SystemExit("Prepared LIVE recovery journal is not flat/clean.")
+
+          approval_files = {}
+          for name in sorted(allowed):
+              path = approved_dir / name
+              if path.is_file():
+                  approval_files[name] = {
+                      "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                      "size_bytes": path.stat().st_size,
+                  }
+
+          approval = {
+              "schema_version": 1,
+              "approved": True,
+              "mode": "LIVE",
+              "symbol": "XAUTUSD",
+              "product_id": 131253,
+              "repository": repo,
+              "target_branch": branch,
+              "approved_by": os.environ["GITHUB_ACTOR"],
+              "recovery_run_id": os.environ["GITHUB_RUN_ID"],
+              "recovery_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "blocked_run_id": str(blocked_run["id"]),
+              "blocked_run_attempt": str(blocked_attempt),
+              "blocked_run_created_at": blocked_created,
+              "source_run_id": source_run_id,
+              "source_run_attempt": source_attempt,
+              "approved_at_utc": datetime.now(timezone.utc).isoformat(),
+              "exchange_position_verified_zero": True,
+              "exchange_open_orders_verified_empty": True,
+              "files": approval_files,
+          }
+          (approved_dir / "manual_recovery_approval.json").write_text(
+              json.dumps(approval, separators=(",", ":")), encoding="utf-8"
+          )
+          print("LIVE MANUAL RECOVERY APPROVAL PREPARED.")
+          print("Interrupted LIVE run:", blocked_run["id"], "attempt", blocked_attempt)
+          print("Source:", source_run_id or "fresh flat baseline")
+          print("Delta account: position zero; no open XAUTUSD orders.")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"blocked_run_id={blocked_run['id']}\n")
+              output.write(f"source_run_id={source_run_id or 'FRESH_FLAT_BASELINE'}\n")
+              output.write(f"source_attempt={source_attempt or 'N/A'}\n")
+
+          PY
+
       - name: Upload approved recovery checkpoint
         id: upload_recovery
+        if: ${{ (inputs.recovery_mode == 'PAPER' && steps.verify_source.outcome == 'success') || (inputs.recovery_mode == 'LIVE' && steps.verify_live_source.outcome == 'success') }}
         timeout-minutes: 5
         uses: actions/upload-artifact@v7
         with:
-          name: xaut-manual-recovery-approved-a${{ github.run_attempt }}
+          name: ${{ inputs.recovery_mode == 'LIVE' && 'xaut-live-manual-recovery-approved-a' || 'xaut-manual-recovery-approved-a' }}${{ github.run_attempt }}
           path: approved-recovery/
           if-no-files-found: error
           retention-days: 30
 
       - name: Verify approved recovery artifact is available
+        if: steps.upload_recovery.outcome == 'success'
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_ARTIFACT_ID: ${{ steps.upload_recovery.outputs.artifact-id }}
-          EXPECTED_ARTIFACT_NAME: xaut-manual-recovery-approved-a${{ github.run_attempt }}
+          EXPECTED_ARTIFACT_NAME: ${{ inputs.recovery_mode == 'LIVE' && 'xaut-live-manual-recovery-approved-a' || 'xaut-manual-recovery-approved-a' }}${{ github.run_attempt }}
         shell: bash
         run: |
           set -euo pipefail
@@ -478,9 +854,9 @@ jobs:
           done
           [[ "$VERIFIED" == true ]] || { echo "::error::Uploaded recovery artifact could not be verified."; exit 1; }
           {
-            echo "### Manual recovery checkpoint approved"
-            echo "Blocked Setup A run: \\`${{ steps.verify_source.outputs.blocked_run_id }}\\`"
-            echo "Selected source checkpoint: \\`${{ steps.verify_source.outputs.source_run_id }}\\` attempt \\`${{ steps.verify_source.outputs.source_attempt }}\\`"
+            echo "### ${{ inputs.recovery_mode }} manual recovery checkpoint approved"
+            echo "Blocked Setup A run: \\`${{ inputs.recovery_mode == 'LIVE' && steps.verify_live_source.outputs.blocked_run_id || steps.verify_source.outputs.blocked_run_id }}\\`"
+            echo "Selected source checkpoint: \\`${{ inputs.recovery_mode == 'LIVE' && steps.verify_live_source.outputs.source_run_id || steps.verify_source.outputs.source_run_id }}\\`"
             echo "Artifact: \\`${EXPECTED_ARTIFACT_NAME}\\`"
             echo "The next Setup A run can use this approval only for the exact blocked run recorded above."
           } >> "$GITHUB_STEP_SUMMARY"
