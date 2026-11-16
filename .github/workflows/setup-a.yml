@@ -3,6 +3,12 @@ run-name: Setup A - Paper State v3
 
 on:
   workflow_dispatch:
+    inputs:
+      enable_live_trading:
+        description: "Request LIVE trading (currently blocked; Setup A remains Paper-only)"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -40,6 +46,18 @@ jobs:
           token: ${{ secrets.BOT_REPO_TOKEN }}
           path: private-bot
           persist-credentials: false
+
+      # Fail closed: this workflow's restore and checkpoint pipeline is Paper-only.
+      # Do not remove this guard until LIVE execution-journal restore/validation,
+      # reconciliation, and checkpoint recovery have been implemented and tested.
+      - name: Block live request until live-state recovery is supported
+        if: ${{ inputs.enable_live_trading }}
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::error::LIVE trading is blocked in Setup A. Its restore and checkpoint pipeline only accepts PAPER state. Leave the checkbox unchecked and use Paper Mode."
+          exit 1
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -1010,6 +1028,13 @@ jobs:
           print("Graceful shutdown code is present in private-bot/bot.py.")
           PY
 
+      - name: Run combined offline pre-live regression suite
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tests/test_pre_live_suite.py private-bot/bot.py
+
       - name: Run isolated forced-interruption safety simulation
         timeout-minutes: 3
         shell: bash
@@ -1104,6 +1129,7 @@ jobs:
         env:
           API_KEY: ${{ secrets.API_KEY }}
           API_SECRET: ${{ secrets.API_SECRET }}
+          # Deliberately hardcoded false: live requests are blocked above until live-state recovery exists.
           ENABLE_LIVE_TRADING: "false"
           # Temporary fast test setting. Change to 350 only after all takeover tests pass.
           BOT_RUNTIME_MINUTES: "5"
