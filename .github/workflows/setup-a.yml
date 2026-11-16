@@ -41,7 +41,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests websocket-client
 
       - name: Show GitHub Runner Public IP
         run: |
@@ -66,6 +66,13 @@ jobs:
           API_SECRET: ${{ secrets.API_SECRET }}
           ENABLE_LIVE_TRADING: ${{ inputs.enable_live_trading && 'true' || 'false' }}
           BOT_RUNTIME_MINUTES: "5"
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_USE_SSL: ${{ secrets.SMTP_USE_SSL }}
+          ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
         working-directory: private-bot
         run: python -u bot.py
 
