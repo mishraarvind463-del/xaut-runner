@@ -69,6 +69,41 @@ jobs:
             echo "No recovery checkpoint found in the last 20 completed runs; bot will reconcile directly with Delta."
           fi
 
+      - name: Restore latest trade history
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          echo "Searching recent completed runs for the latest trade-history artifact."
+          RUN_IDS=$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "Run XAUT Bot" \
+            --json databaseId,status \
+            --limit 20 \
+            --jq '.[] | select(.status == "completed") | .databaseId')
+          RESTORED=false
+          while IFS= read -r PREVIOUS_RUN_ID; do
+            [ -n "$PREVIOUS_RUN_ID" ] || continue
+            CANDIDATE_DIR=$(mktemp -d)
+            echo "Checking trade-history artifact from run $PREVIOUS_RUN_ID."
+            gh run download "$PREVIOUS_RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "xaut-trade-history-$PREVIOUS_RUN_ID" \
+              --dir "$CANDIDATE_DIR"
+            DOWNLOAD_STATUS=$?
+            if [ "$DOWNLOAD_STATUS" -eq 0 ] && [ -s "$CANDIDATE_DIR/trade_history.csv" ]; then
+              cp "$CANDIDATE_DIR/trade_history.csv" private-bot/trade_history.csv
+              echo "Trade history restored from run $PREVIOUS_RUN_ID."
+              RESTORED=true
+              rm -rf "$CANDIDATE_DIR"
+              break
+            fi
+            rm -rf "$CANDIDATE_DIR"
+          done <<< "$RUN_IDS"
+          if [ "$RESTORED" != "true" ]; then
+            echo "No previous trade-history artifact found in the last 20 completed runs; a new history file will be created after the first completed trade."
+          fi
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -118,7 +153,7 @@ jobs:
         with:
           name: xaut-trade-history-${{ github.run_id }}
           path: private-bot/trade_history.csv
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 30
 
       - name: Upload recovery checkpoint
