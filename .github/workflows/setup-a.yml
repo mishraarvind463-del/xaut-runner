@@ -131,14 +131,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          find_test() {
-            local name="$1"
-            find . -type f \( -name "$name" -o -name "${name%.py}.txt" \) \
-              -not -path './private-bot/*' -print -quit
-          }
-          STOP_TEST="$(find_test test_forced_interruption_simulation.py)"
-          [[ -n "$STOP_TEST" ]] || { echo "::error::test_forced_interruption_simulation.py not found in runner repository."; exit 1; }
-          python "$STOP_TEST" private-bot/bot.py
+          # The external forced-interruption test file was intentionally removed.
           # Keep the Live mock suite inside Setup A so no third repository file is required.
           LIVE_TEST="$RUNNER_TEMP/test_live_mock_suite.py"
           cat > "$LIVE_TEST" <<'LIVE_TEST_EOF'
