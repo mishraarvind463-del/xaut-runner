@@ -25,6 +25,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Checkout private bot
+        uses: actions/checkout@v4
+        with:
+          repository: mishraarvind463-del/xaut-bot
+          token: ${{ secrets.BOT_REPO_TOKEN }}
+          path: private-bot
+          persist-credentials: false
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -57,5 +65,15 @@ jobs:
           API_KEY: ${{ secrets.API_KEY }}
           API_SECRET: ${{ secrets.API_SECRET }}
           ENABLE_LIVE_TRADING: ${{ inputs.enable_live_trading && 'true' || 'false' }}
-          BOT_RUNTIME_MINUTES: "340"
+          BOT_RUNTIME_MINUTES: "5"
+        working-directory: private-bot
         run: python -u bot.py
+
+      - name: Upload trade history
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xaut-trade-history-${{ github.run_id }}
+          path: private-bot/trade_history.csv
+          if-no-files-found: ignore
+          retention-days: 30
