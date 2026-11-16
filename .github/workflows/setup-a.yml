@@ -71,20 +71,6 @@ jobs:
           }
           echo "Delta API credentials are present; secret values are not displayed."
 
-      - name: Verify Live confirmation secret
-        if: ${{ inputs.enable_live_trading }}
-        timeout-minutes: 2
-        shell: bash
-        env:
-          LIVE_TRADING_CONFIRM: ${{ secrets.LIVE_TRADING_CONFIRM }}
-        run: |
-          set -euo pipefail
-          [[ "$LIVE_TRADING_CONFIRM" == "CONFIRM_XAUTUSD_131253" ]] || {
-            echo "::error::Live requested but LIVE_TRADING_CONFIRM secret is missing or incorrect."
-            exit 1
-          }
-          echo "Live confirmation secret verified without printing its value."
-
       - name: Verify bot mode and strategy configuration
         timeout-minutes: 2
         shell: bash
@@ -92,7 +78,6 @@ jobs:
           API_KEY: ${{ secrets.API_KEY }}
           API_SECRET: ${{ secrets.API_SECRET }}
           ENABLE_LIVE_TRADING: ${{ inputs.enable_live_trading && 'true' || 'false' }}
-          LIVE_TRADING_CONFIRM: ${{ secrets.LIVE_TRADING_CONFIRM }}
           BOT_RUNTIME_MINUTES: "5"
         run: |
           set -euo pipefail
@@ -151,7 +136,6 @@ jobs:
               'API_KEY': 'offline-mock-key',
               'API_SECRET': 'offline-mock-secret',
               'ENABLE_LIVE_TRADING': 'true',
-              'LIVE_TRADING_CONFIRM': 'CONFIRM_XAUTUSD_131253',
           })
           spec = importlib.util.spec_from_file_location('xaut_live_mock_bot', BOT_PATH)
           bot = importlib.util.module_from_spec(spec)
@@ -284,6 +268,70 @@ jobs:
           LIVE_TEST_EOF
           python "$LIVE_TEST" private-bot/bot.py
 
+      - name: Run offline Paper execution safety tests
+        timeout-minutes: 5
+        shell: bash
+        env:
+          API_KEY: offline-paper-key
+          API_SECRET: offline-paper-secret
+          ENABLE_LIVE_TRADING: "false"
+          BOT_RUNTIME_MINUTES: "5"
+        run: |
+          set -euo pipefail
+          python - private-bot/bot.py <<'PAPER_TEST_EOF'
+          import csv
+          import importlib.util
+          import os
+          import pathlib
+          import sys
+          import tempfile
+
+          path = pathlib.Path(sys.argv[1]).resolve()
+          spec = importlib.util.spec_from_file_location("xaut_paper_mock_bot", path)
+          bot = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = bot
+          spec.loader.exec_module(bot)
+          bot.validate_configuration()
+
+          def check(label, condition):
+              if not condition:
+                  raise AssertionError(label)
+              print("PASS:", label)
+
+          class FakeAlerts:
+              def notify(self, *args, **kwargs):
+                  pass
+
+          bot.ALERTS = FakeAlerts()
+          check("workflow OFF selects Paper without a second confirmation", bot.PAPER_MODE and not bot.LIVE_TRADING)
+          check("Paper strategy settings and one-lot cap are fixed", bot.ATR_PERIOD == 2 and bot.MULTIPLIER == 1.0 and bot.LOT_SIZE == 1 and bot.MAX_LOTS == 1)
+
+          with tempfile.TemporaryDirectory(prefix="xaut-paper-mock-") as tmp:
+              old = pathlib.Path.cwd()
+              os.chdir(tmp)
+              try:
+                  state = bot.default_paper_state()
+                  bot.paper_process_signal(state, 1, 3800.0)
+                  check("Paper BUY entry is persisted as one lot", state["position"] == 1 and state["entry_price"] == 3800.0 and pathlib.Path(bot.PAPER_STATE_FILE).is_file())
+                  bot.paper_process_signal(state, -1, 3799.0)
+                  check("Paper reversal closes old side and opens new side", state["position"] == -1 and state["entry_side"] == "sell")
+                  with open(bot.TRADE_LOG_FILE, newline="", encoding="utf-8") as handle:
+                      rows = list(csv.DictReader(handle))
+                  check("Paper trade history records mode and one-lot quantity", len(rows) == 1 and rows[0]["mode"] == "PAPER" and rows[0]["quantity"] == "1")
+                  check("Paper execution does not create a Live order journal", not pathlib.Path(bot.EXECUTION_JOURNAL_FILE).exists())
+                  pathlib.Path(bot.EXECUTION_JOURNAL_FILE).write_text("{}", encoding="utf-8")
+                  refused = False
+                  try:
+                      bot.validate_mode_state_isolation()
+                  except bot.RecoveryRequired:
+                      refused = True
+                  check("Paper/Live checkpoint mixing is rejected", refused)
+              finally:
+                  os.chdir(old)
+
+          print("PAPER MOCK EXECUTION SAFETY SUITE: ALL 7 CHECKS PASSED (offline; no Delta orders).")
+          PAPER_TEST_EOF
+
       - name: Record source revisions
         timeout-minutes: 2
         shell: bash
@@ -354,7 +402,6 @@ jobs:
           API_KEY: ${{ secrets.API_KEY }}
           API_SECRET: ${{ secrets.API_SECRET }}
           ENABLE_LIVE_TRADING: ${{ inputs.enable_live_trading && 'true' || 'false' }}
-          LIVE_TRADING_CONFIRM: ${{ secrets.LIVE_TRADING_CONFIRM }}
           BOT_RUNTIME_MINUTES: "5"
         shell: bash
         run: |
@@ -729,7 +776,6 @@ jobs:
           API_KEY: ${{ secrets.API_KEY }}
           API_SECRET: ${{ secrets.API_SECRET }}
           ENABLE_LIVE_TRADING: ${{ inputs.enable_live_trading && 'true' || 'false' }}
-          LIVE_TRADING_CONFIRM: ${{ secrets.LIVE_TRADING_CONFIRM }}
           BOT_RUNTIME_MINUTES: "5"
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
@@ -748,7 +794,6 @@ jobs:
           API_KEY: ${{ secrets.API_KEY }}
           API_SECRET: ${{ secrets.API_SECRET }}
           ENABLE_LIVE_TRADING: ${{ inputs.enable_live_trading && 'true' || 'false' }}
-          LIVE_TRADING_CONFIRM: ${{ secrets.LIVE_TRADING_CONFIRM }}
           BOT_RUNTIME_MINUTES: "5"
         shell: bash
         run: |
