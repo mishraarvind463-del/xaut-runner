@@ -1,11 +1,11 @@
 name: Setup A
-run-name: Setup A - Paper State v3
+run-name: Setup A - ${{ inputs.enable_live_trading && 'LIVE' || 'PAPER' }}
 
 on:
   workflow_dispatch:
     inputs:
       enable_live_trading:
-        description: "Request LIVE trading (currently blocked; Setup A remains Paper-only)"
+        description: "Enable LIVE trading (unchecked = Paper; checked = Live)"
         required: true
         type: boolean
         default: false
@@ -23,12 +23,11 @@ concurrency:
 jobs:
   runner:
     runs-on: ubuntu-latest
-    # 5-minute Paper test runtime plus startup, graceful shutdown, and checkpoint upload.
+    # 15-minute Live pilot plus startup, graceful shutdown, and checkpoint upload.
     timeout-minutes: 45
 
     steps:
-      # Checkout this runner repository at the workspace root. The workflow's
-      # isolated safety simulation is stored in its tests/ directory.
+      # Checkout this runner repository at the workspace root for workflow state handling.
       - name: Checkout runner repository
         id: checkout_runner
         uses: actions/checkout@v7
@@ -47,23 +46,49 @@ jobs:
           path: private-bot
           persist-credentials: false
 
-      # Fail closed: this workflow's restore and checkpoint pipeline is Paper-only.
-      # Do not remove this guard until LIVE execution-journal restore/validation,
-      # reconciliation, and checkpoint recovery have been implemented and tested.
-      - name: Block live request until live-state recovery is supported
-        if: ${{ inputs.enable_live_trading }}
-        timeout-minutes: 1
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "::error::LIVE trading is blocked in Setup A. Its restore and checkpoint pipeline only accepts PAPER state. Leave the checkbox unchecked and use Paper Mode."
-          exit 1
-
+      # Paper and Live states are restored separately; Live uses its own journal and exchange reconciliation.
       - name: Setup Python
         uses: actions/setup-python@v7
         timeout-minutes: 10
         with:
           python-version: "3.12"
+
+      - name: Install dependencies
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip --retries 5 --timeout 30
+          python -m pip install --retries 5 --timeout 30 -r private-bot/requirements.txt
+          python -m pip check
+
+      - name: Verify required API secrets are present
+        timeout-minutes: 2
+        shell: bash
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+          API_SECRET: ${{ secrets.API_SECRET }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${API_KEY:-}" || -z "${API_SECRET:-}" ]]; then
+            echo "::error::API_KEY or API_SECRET repository secret is missing."
+            exit 1
+          fi
+          echo "Required Delta API secrets are present (values not displayed)."
+
+      - name: Verify Live confirmation secret
+        if: ${{ inputs.enable_live_trading }}
+        timeout-minutes: 1
+        shell: bash
+        env:
+          LIVE_TRADING_CONFIRM: ${{ secrets.LIVE_TRADING_CONFIRM }}
+        run: |
+          set -euo pipefail
+          [[ "$LIVE_TRADING_CONFIRM" == "CONFIRM_XAUTUSD_131253" ]] || {
+            echo "::error::Live requested but LIVE_TRADING_CONFIRM secret is missing or incorrect."
+            exit 1
+          }
+          echo "Live confirmation secret verified without displaying its value."
 
       - name: Clear workspace runtime state before restore
         timeout-minutes: 2
@@ -98,6 +123,7 @@ jobs:
           PY
 
       - name: Restore latest verified Paper state
+        if: ${{ !inputs.enable_live_trading }}
         id: restore_state
         timeout-minutes: 15
         env:
@@ -802,11 +828,8 @@ jobs:
 
           source = Path(sys.argv[1])
           allowed = {
-              "paper_state.json",
-              "alert_state.json",
-              "trade_history.csv",
-              "trade_history_legacy.csv",
-              "execution_journal.json",
+              "paper_state.json", "alert_state.json", "trade_history.csv",
+              "trade_history_legacy.csv", "execution_journal.json",
           }
           required = "paper_state.json"
 
@@ -972,30 +995,7 @@ jobs:
         timeout-minutes: 2
         run: rm -f state_manifest.json state_manifest.json.tmp
 
-      - name: Verify required API secrets are present
-        timeout-minutes: 2
-        shell: bash
-        env:
-          API_KEY: ${{ secrets.API_KEY }}
-          API_SECRET: ${{ secrets.API_SECRET }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${API_KEY:-}" || -z "${API_SECRET:-}" ]]; then
-            echo "::error::API_KEY or API_SECRET repository secret is missing."
-            exit 1
-          fi
-          echo "Required Delta API secrets are present (values not displayed)."
-
-      - name: Install dependencies
-        timeout-minutes: 10
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m pip install --upgrade pip --retries 5 --timeout 30
-          python -m pip install --retries 5 --timeout 30 -r private-bot/requirements.txt
-          python -m pip check
-
-      - name: Verify graceful-stop support in bot
+      - name: Verify bot syntax and required recovery functions
         timeout-minutes: 2
         shell: bash
         run: |
@@ -1017,6 +1017,9 @@ jobs:
               "stop_requested",
               "wait_or_stop",
               "shutdown_bot",
+              "startup_live_reconciliation",
+              "default_execution_journal",
+              "write_state_manifest",
           }
           missing = sorted(required - functions)
           if missing:
@@ -1028,19 +1031,6 @@ jobs:
           print("Graceful shutdown code is present in private-bot/bot.py.")
           PY
 
-      - name: Run combined offline pre-live regression suite
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          set -euo pipefail
-          python tests/test_pre_live_suite.py private-bot/bot.py
-
-      - name: Run isolated forced-interruption safety simulation
-        timeout-minutes: 3
-        shell: bash
-        run: |
-          set -euo pipefail
-          python tests/test_forced_interruption_simulation.py private-bot/bot.py
 
       - name: Record bot source revision
         timeout-minutes: 2
@@ -1087,9 +1077,327 @@ jobs:
           echo "Waiting 90 seconds before the read-only Paper Mode bot starts."
           sleep 90
 
+      - name: Restore latest verified LIVE state or initialize only from a flat account
+        id: restore_live_state
+        if: ${{ inputs.enable_live_trading }}
+        timeout-minutes: 15
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API_KEY: ${{ secrets.API_KEY }}
+          API_SECRET: ${{ secrets.API_SECRET }}
+          ENABLE_LIVE_TRADING: "true"
+          LIVE_TRADING_CONFIRM: ${{ secrets.LIVE_TRADING_CONFIRM }}
+          BOT_RUNTIME_MINUTES: "15"
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path("private-bot").resolve()))
+          import bot
+
+          REPO = os.environ["GITHUB_REPOSITORY"]
+          BRANCH = os.environ["GITHUB_REF_NAME"]
+          WORKFLOW_PATH = ".github/workflows/setup-a.yml"
+          RECOVERY_PATH = ".github/workflows/manual-recovery.yml"
+          WORKSPACE = Path(os.environ["GITHUB_WORKSPACE"])
+          RUNNER_TEMP = Path(os.environ["RUNNER_TEMP"])
+          bot.validate_configuration()
+          if not bot.API_KEY or not bot.API_SECRET:
+              raise SystemExit("LIVE RESTORE BLOCKED: API_KEY/API_SECRET are missing.")
+          if (bot.LOT_SIZE != 1 or bot.MAX_LOTS != 1 or bot.ATR_PERIOD != 2
+                  or float(bot.MULTIPLIER) != 1.0 or bot.CANDLE_CLOSE_DELAY != 3
+                  or bot.CANDLE_SYMBOL != "MARK:XAUTUSD" or bot.BOT_RUNTIME_MINUTES != 15):
+              raise SystemExit("LIVE RESTORE BLOCKED: bot settings do not match the approved 1-lot/15-minute configuration.")
+
+          def gh_json(args):
+              last_error = None
+              for attempt in range(1, 6):
+                  try:
+                      raw = subprocess.check_output(["gh", *args], text=True, stderr=subprocess.STDOUT)
+                      return json.loads(raw)
+                  except Exception as error:
+                      last_error = error
+                      if attempt < 5:
+                          time.sleep(attempt * 2)
+              raise SystemExit(f"LIVE RESTORE BLOCKED: GitHub read failed after retries: {last_error!r}")
+
+          def flatten_pages(value, key):
+              if isinstance(value, list):
+                  out = []
+                  for page in value:
+                      if isinstance(page, dict):
+                          out.extend(page.get(key, []) or [])
+                  return out
+              return value.get(key, []) if isinstance(value, dict) else []
+
+          pages = gh_json([
+              "api", "--paginate", "--slurp",
+              "-f", f"branch={BRANCH}",
+              "-f", "event=workflow_dispatch",
+              "-F", "per_page=100",
+              f"repos/{REPO}/actions/runs",
+          ])
+          all_branch_runs = flatten_pages(pages, "workflow_runs")
+          runs = [
+              r for r in all_branch_runs
+              if r.get("head_branch") == BRANCH
+              and r.get("event") == "workflow_dispatch"
+              and (r.get("path", "").split("@", 1)[0] == WORKFLOW_PATH)
+              and str(r.get("id")) != os.environ["GITHUB_RUN_ID"]
+          ]
+          runs.sort(key=lambda r: (r.get("created_at", ""), int(r.get("id", 0))), reverse=True)
+
+          def get_artifacts(run_id):
+              payload = gh_json(["api", f"repos/{REPO}/actions/runs/{run_id}/artifacts?per_page=100"])
+              return [a for a in payload.get("artifacts", []) if not a.get("expired", False)]
+
+          def artifact_attempts(artifacts, pattern):
+              values = []
+              rx = re.compile(pattern)
+              for artifact in artifacts:
+                  match = rx.fullmatch(artifact.get("name", ""))
+                  if match:
+                      values.append(int(match.group(1)))
+              return max(values, default=0)
+
+          def attempt_meta(run_id, attempt):
+              return gh_json(["api", f"repos/{REPO}/actions/runs/{run_id}/attempts/{attempt}"])
+
+          def download(run_id, artifact_name, folder):
+              if folder.exists():
+                  shutil.rmtree(folder)
+              folder.mkdir(parents=True, exist_ok=True)
+              subprocess.check_call([
+                  "gh", "run", "download", str(run_id),
+                  "--repo", REPO, "--name", artifact_name, "--dir", str(folder)
+              ])
+
+          def read_json(path):
+              if path.is_symlink() or not path.is_file():
+                  raise SystemExit(f"LIVE RESTORE BLOCKED: required regular file missing: {path.name}")
+              value = json.loads(path.read_text(encoding="utf-8"))
+              if not isinstance(value, dict):
+                  raise SystemExit(f"LIVE RESTORE BLOCKED: invalid JSON object: {path.name}")
+              return value
+
+          def validate_live_files(folder, manifest, expected_run=None, expected_attempt=None,
+                                  expected_sha=None, marker_folder=None):
+              if manifest.get("schema_version") != 1 or manifest.get("mode") != "LIVE":
+                  raise SystemExit("LIVE RESTORE BLOCKED: checkpoint manifest is not schema-v1 LIVE.")
+              if manifest.get("symbol") != "XAUTUSD" or int(manifest.get("product_id", -1)) != 131253:
+                  raise SystemExit("LIVE RESTORE BLOCKED: checkpoint product identity mismatch.")
+              records = manifest.get("files")
+              if not isinstance(records, dict) or "execution_journal.json" not in records:
+                  raise SystemExit("LIVE RESTORE BLOCKED: LIVE checkpoint has no execution journal.")
+              allowed = {
+                  "execution_journal.json", "alert_state.json",
+                  "trade_history.csv", "trade_history_legacy.csv",
+              }
+              if not set(records).issubset(allowed):
+                  raise SystemExit("LIVE RESTORE BLOCKED: checkpoint contains unexpected file names.")
+              for name, record in records.items():
+                  path = folder / name
+                  if path.is_symlink() or not path.is_file() or not isinstance(record, dict):
+                      raise SystemExit(f"LIVE RESTORE BLOCKED: invalid checkpoint file: {name}")
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  if record.get("sha256") != digest or int(record.get("size_bytes", -1)) != path.stat().st_size:
+                      raise SystemExit(f"LIVE RESTORE BLOCKED: checksum/size mismatch: {name}")
+              for name in list(records):
+                  if (folder / (name + ".tmp")).exists():
+                      raise SystemExit(f"LIVE RESTORE BLOCKED: unfinished temporary file: {name}.tmp")
+              journal = read_json(folder / "execution_journal.json")
+              if (journal.get("version") != 1 or journal.get("symbol") != "XAUTUSD"
+                      or int(journal.get("product_id", -1)) != 131253):
+                  raise SystemExit("LIVE RESTORE BLOCKED: execution journal identity/version mismatch.")
+              managed = float(journal.get("managed_position", 999))
+              if managed != 0 or journal.get("pending_order") is not None:
+                  raise SystemExit("LIVE RESTORE BLOCKED: checkpoint journal is not flat/clean.")
+              if expected_run is not None:
+                  run_meta = manifest.get("run")
+                  if not isinstance(run_meta, dict):
+                      raise SystemExit("LIVE RESTORE BLOCKED: checkpoint run metadata is missing.")
+                  if str(run_meta.get("workflow_run_id", "")) != str(expected_run.get("id")):
+                      raise SystemExit("LIVE RESTORE BLOCKED: manifest run ID mismatch.")
+                  if str(run_meta.get("workflow_run_attempt", "")) != str(expected_attempt):
+                      raise SystemExit("LIVE RESTORE BLOCKED: manifest attempt mismatch.")
+                  if run_meta.get("repository") != REPO or run_meta.get("ref_name") != BRANCH:
+                      raise SystemExit("LIVE RESTORE BLOCKED: manifest repository/branch mismatch.")
+                  if expected_sha and run_meta.get("runner_commit_sha") != expected_sha:
+                      raise SystemExit("LIVE RESTORE BLOCKED: manifest runner commit mismatch.")
+              if marker_folder is not None:
+                  marker = read_json(marker_folder / "xaut-run-started.json")
+                  if (marker.get("mode") != "LIVE"
+                          or str(marker.get("workflow_run_id", "")) != str(expected_run.get("id"))
+                          or str(marker.get("workflow_run_attempt", "")) != str(expected_attempt)
+                          or marker.get("repository") != REPO
+                          or marker.get("branch") != BRANCH
+                          or marker.get("workflow_commit") != expected_sha
+                          or not marker.get("bot_commit")):
+                      raise SystemExit("LIVE RESTORE BLOCKED: LIVE start marker does not match source run.")
+                  if marker.get("bot_commit") != manifest.get("run", {}).get("bot_commit_sha"):
+                      raise SystemExit("LIVE RESTORE BLOCKED: bot commit differs between marker and manifest.")
+              return records
+
+          # Identify the newest LIVE attempt only. PAPER artifacts are deliberately ignored.
+          blocked = None
+          latest_good = None
+          for run in runs:
+              artifacts = get_artifacts(run["id"])
+              marker_attempt = artifact_attempts(
+                  artifacts, r"xaut-live-run-started-a([0-9]+)"
+              )
+              state_attempt = artifact_attempts(
+                  artifacts, r"xaut-live-state-a([0-9]+)"
+              )
+              if marker_attempt == 0 and state_attempt == 0:
+                  continue
+              evidence_attempt = max(marker_attempt, state_attempt)
+              meta = attempt_meta(run["id"], evidence_attempt)
+              if marker_attempt > 0 and marker_attempt == state_attempt:
+                  if meta.get("status") == "completed" and meta.get("conclusion") == "success":
+                      latest_good = (run, evidence_attempt)
+                  else:
+                      blocked = (run, evidence_attempt)
+              else:
+                  blocked = (run, evidence_attempt)
+              break
+
+          def restore_approved_recovery(blocked_run, blocked_attempt):
+              recoveries = [
+                  r for r in all_branch_runs
+                  if r.get("path", "").split("@", 1)[0] == RECOVERY_PATH
+                  and r.get("status") == "completed"
+                  and r.get("conclusion") == "success"
+                  and r.get("created_at", "") > blocked_run.get("created_at", "")
+              ]
+              recoveries.sort(key=lambda r: (r.get("created_at", ""), int(r.get("id", 0))), reverse=True)
+              # The run list was originally fetched for all workflow_dispatch events on this branch.
+              for recovery in recoveries:
+                  recovery_attempt = int(recovery.get("run_attempt", 1))
+                  artifact_name = f"xaut-live-manual-recovery-approved-a{recovery_attempt}"
+                  artifacts = get_artifacts(recovery["id"])
+                  if not any(a.get("name") == artifact_name for a in artifacts):
+                      continue
+                  folder = RUNNER_TEMP / f"live-approved-{recovery['id']}-{recovery_attempt}"
+                  download(recovery["id"], artifact_name, folder)
+                  approval = read_json(folder / "manual_recovery_approval.json")
+                  if not (
+                      approval.get("approved") is True
+                      and approval.get("mode") == "LIVE"
+                      and approval.get("symbol") == "XAUTUSD"
+                      and int(approval.get("product_id", -1)) == 131253
+                      and approval.get("repository") == REPO
+                      and approval.get("target_branch") == BRANCH
+                      and str(approval.get("recovery_run_id")) == str(recovery["id"])
+                      and str(approval.get("recovery_run_attempt")) == str(recovery_attempt)
+                      and str(approval.get("blocked_run_id")) == str(blocked_run["id"])
+                      and str(approval.get("blocked_run_attempt")) == str(blocked_attempt)
+                      and approval.get("exchange_position_verified_zero") is True
+                      and approval.get("exchange_open_orders_verified_empty") is True
+                  ):
+                      continue
+                  records = approval.get("files")
+                  if not isinstance(records, dict) or "execution_journal.json" not in records:
+                      raise SystemExit("LIVE RESTORE BLOCKED: matching manual recovery artifact is malformed.")
+                  allowed = {
+                      "execution_journal.json", "alert_state.json",
+                      "trade_history.csv", "trade_history_legacy.csv", "state_manifest.json",
+                  }
+                  if not set(records).issubset(allowed) or "state_manifest.json" not in records:
+                      raise SystemExit("LIVE RESTORE BLOCKED: manual recovery bundle contains unexpected files.")
+                  for name, record in records.items():
+                      path = folder / name
+                      if path.is_symlink() or not path.is_file():
+                          raise SystemExit(f"LIVE RESTORE BLOCKED: recovery file missing: {name}")
+                      if hashlib.sha256(path.read_bytes()).hexdigest() != record.get("sha256"):
+                          raise SystemExit(f"LIVE RESTORE BLOCKED: recovery file checksum mismatch: {name}")
+                      if path.stat().st_size != int(record.get("size_bytes", -1)):
+                          raise SystemExit(f"LIVE RESTORE BLOCKED: recovery file size mismatch: {name}")
+                  manifest = read_json(folder / "state_manifest.json")
+                  if manifest.get("mode") != "LIVE" or manifest.get("symbol") != "XAUTUSD" or int(manifest.get("product_id", -1)) != 131253:
+                      raise SystemExit("LIVE RESTORE BLOCKED: approved recovery manifest is not LIVE/XAUTUSD.")
+                  journal = read_json(folder / "execution_journal.json")
+                  if (journal.get("version") != 1 or journal.get("symbol") != "XAUTUSD"
+                          or int(journal.get("product_id", -1)) != 131253
+                          or float(journal.get("managed_position", 999)) != 0
+                          or journal.get("pending_order") is not None):
+                      raise SystemExit("LIVE RESTORE BLOCKED: approved recovery journal is not flat/clean.")
+                  manifest_records = manifest.get("files")
+                  if not isinstance(manifest_records, dict) or "execution_journal.json" not in manifest_records:
+                      raise SystemExit("LIVE RESTORE BLOCKED: approved manifest is missing execution journal.")
+                  for name, record in manifest_records.items():
+                      if name not in records or record.get("sha256") != records[name].get("sha256"):
+                          raise SystemExit(f"LIVE RESTORE BLOCKED: approved manifest/file list mismatch: {name}")
+                  for name in records:
+                      if name == "state_manifest.json":
+                          continue
+                      shutil.copy2(folder / name, WORKSPACE / name)
+                  print(
+                      "LIVE MANUAL RECOVERY APPROVAL ACCEPTED:",
+                      "blocked run", blocked_run["id"], "attempt", blocked_attempt,
+                      "| recovery run", recovery["id"],
+                  )
+                  return True
+              return False
+
+          if blocked is not None:
+              blocked_run, blocked_attempt = blocked
+              if not restore_approved_recovery(blocked_run, blocked_attempt):
+                  raise SystemExit(
+                      "LIVE RESTORE BLOCKED: the latest LIVE run has no verified checkpoint. "
+                      "Manually close/verify the XAUTUSD position and all open orders on Delta, "
+                      "then run Manual Recovery with mode LIVE. Do not simply rerun Setup A."
+                  )
+          elif latest_good is not None:
+              run, attempt = latest_good
+              state_name = f"xaut-live-state-a{attempt}"
+              marker_name = f"xaut-live-run-started-a{attempt}"
+              state_dir = RUNNER_TEMP / f"live-state-{run['id']}-{attempt}"
+              marker_dir = RUNNER_TEMP / f"live-marker-{run['id']}-{attempt}"
+              download(run["id"], state_name, state_dir)
+              download(run["id"], marker_name, marker_dir)
+              marker = read_json(marker_dir / "xaut-run-started.json")
+              records = validate_live_files(
+                  state_dir, read_json(state_dir / "state_manifest.json"),
+                  expected_run=run, expected_attempt=attempt,
+                  expected_sha=run.get("head_sha"), marker_folder=marker_dir
+              )
+              for name in records:
+                  shutil.copy2(state_dir / name, WORKSPACE / name)
+              print("LATEST VERIFIED LIVE CHECKPOINT RESTORED FROM RUN", run["id"], "ATTEMPT", attempt)
+          else:
+              # First LIVE run for Setup A (or no retained LIVE evidence): do not assume
+              # an account is flat. Verify exchange position and orders before a new journal.
+              bot.save_execution_journal(bot.default_execution_journal())
+              print("FIRST LIVE START: new flat execution journal prepared; exchange check follows.")
+          # Every successful LIVE Setup A shutdown must leave a flat account. Verify again
+          # before the bot-start marker so a manual/non-bot position cannot enter the bot.
+          bot.validate_product_identity()
+          position = bot.read_stable_position()
+          orders = bot.get_open_orders()
+          if position is None or abs(float(position)) > bot.POSITION_TOLERANCE:
+              raise SystemExit(f"LIVE START BLOCKED: Delta position is not verified flat ({position}).")
+          if orders is None or orders:
+              raise SystemExit("LIVE START BLOCKED: Delta open-order list is not verified empty.")
+          print("LIVE PRE-START RECONCILIATION: position zero and no open XAUTUSD orders.")
+
+          PY
+
       - name: Prepare bot-start marker
         id: prepare_run_marker
         timeout-minutes: 2
+        env:
+          ENABLE_LIVE_TRADING: ${{ inputs.enable_live_trading && 'true' || 'false' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1105,6 +1413,7 @@ jobs:
               "workflow_commit": os.environ.get("GITHUB_SHA", ""),
               "bot_commit": os.environ.get("BOT_COMMIT_SHA", ""),
               "created_at_utc": datetime.now(timezone.utc).isoformat(),
+              "mode": "LIVE" if os.environ.get("ENABLE_LIVE_TRADING", "false").lower() == "true" else "PAPER",
           }
           with open(os.path.join(os.environ["RUNNER_TEMP"], "xaut-run-started.json"), "w", encoding="utf-8") as handle:
               json.dump(payload, handle, separators=(",", ":"))
@@ -1116,23 +1425,23 @@ jobs:
         timeout-minutes: 5
         uses: actions/upload-artifact@v7
         with:
-          name: xaut-run-started-a${{ github.run_attempt }}
+          name: ${{ inputs.enable_live_trading && 'xaut-live-run-started-a' || 'xaut-run-started-a' }}${{ github.run_attempt }}
           path: ${{ runner.temp }}/xaut-run-started.json
           if-no-files-found: error
           retention-days: 30
 
-      - name: Run bot in Paper Mode
+      - name: Run bot in selected mode
         id: run_bot
         if: steps.upload_run_marker.outcome == 'success'
-        # 5-minute test runtime plus a generous graceful-shutdown margin.
+        # Live uses a supervised 15-minute pilot; Paper keeps the existing 5-minute runtime.
         timeout-minutes: 25
         env:
           API_KEY: ${{ secrets.API_KEY }}
           API_SECRET: ${{ secrets.API_SECRET }}
-          # Deliberately hardcoded false: live requests are blocked above until live-state recovery exists.
-          ENABLE_LIVE_TRADING: "false"
-          # Temporary fast test setting. Change to 350 only after all takeover tests pass.
-          BOT_RUNTIME_MINUTES: "5"
+          ENABLE_LIVE_TRADING: ${{ inputs.enable_live_trading && 'true' || 'false' }}
+          LIVE_TRADING_CONFIRM: ${{ secrets.LIVE_TRADING_CONFIRM }}
+          # Paper keeps the existing 5-minute run; supervised Live pilot is 15 minutes.
+          BOT_RUNTIME_MINUTES: ${{ inputs.enable_live_trading && '15' || '5' }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -1146,6 +1455,12 @@ jobs:
         id: checkpoint
         if: always() && steps.upload_run_marker.outcome == 'success'
         timeout-minutes: 5
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+          API_SECRET: ${{ secrets.API_SECRET }}
+          ENABLE_LIVE_TRADING: ${{ inputs.enable_live_trading && 'true' || 'false' }}
+          LIVE_TRADING_CONFIRM: ${{ secrets.LIVE_TRADING_CONFIRM }}
+          BOT_RUNTIME_MINUTES: ${{ inputs.enable_live_trading && '15' || '5' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1156,7 +1471,11 @@ jobs:
           import math
           import os
           import shutil
+          import sys
           from pathlib import Path
+
+          mode = "LIVE" if os.environ.get("ENABLE_LIVE_TRADING", "false").lower() == "true" else "PAPER"
+          required_state = "execution_journal.json" if mode == "LIVE" else "paper_state.json"
 
           allowed = {
               "paper_state.json",
@@ -1187,8 +1506,8 @@ jobs:
               fail("unsupported manifest schema")
           if manifest.get("symbol") != "XAUTUSD" or int(manifest.get("product_id", -1)) != 131253:
               fail("manifest symbol/product mismatch")
-          if manifest.get("mode") != "PAPER":
-              fail("workflow is Paper-only but bot manifest is not PAPER")
+          if manifest.get("mode") != mode:
+              fail(f"bot checkpoint mode mismatch: expected {mode}")
           run = manifest.get("run")
           if not isinstance(run, dict):
               fail("manifest run metadata is missing or malformed")
@@ -1197,8 +1516,8 @@ jobs:
           if str(run.get("workflow_run_attempt", "")) != os.environ.get("GITHUB_RUN_ATTEMPT", ""):
               fail("manifest belongs to a different workflow attempt")
           records = manifest.get("files")
-          if not isinstance(records, dict) or "paper_state.json" not in records:
-              fail("manifest is missing required paper_state.json")
+          if not isinstance(records, dict) or required_state not in records:
+              fail(f"manifest is missing required {required_state}")
           names = set(records)
           if not names.issubset(allowed):
               fail(f"manifest contains unexpected file names: {sorted(names - allowed)}")
@@ -1219,16 +1538,33 @@ jobs:
               if path.stat().st_size != int(record.get("size_bytes", -1)):
                   fail(f"file-size mismatch: {name}")
 
-          paper = json.loads(Path("paper_state.json").read_text(encoding="utf-8"))
-          if not isinstance(paper, dict) or paper.get("version") not in (1, 2) or paper.get("symbol") != "XAUTUSD":
-              fail("Paper state version/symbol is invalid")
-          if int(paper.get("product_id", -1)) != 131253 or not isinstance(paper.get("state"), dict):
-              fail("Paper state product/body is invalid")
-          position = float(paper["state"].get("position"))
-          if not math.isfinite(position) or position not in (-1.0, 0.0, 1.0):
-              fail("Paper position is invalid")
-          if paper["state"].get("pending_csv_trade") is not None:
-              fail("Paper CSV outbox remains unresolved")
+          if mode == "PAPER":
+              paper = json.loads(Path("paper_state.json").read_text(encoding="utf-8"))
+              if not isinstance(paper, dict) or paper.get("version") not in (1, 2) or paper.get("symbol") != "XAUTUSD":
+                  fail("Paper state version/symbol is invalid")
+              if int(paper.get("product_id", -1)) != 131253 or not isinstance(paper.get("state"), dict):
+                  fail("Paper state product/body is invalid")
+              position = float(paper["state"].get("position"))
+              if not math.isfinite(position) or position not in (-1.0, 0.0, 1.0):
+                  fail("Paper position is invalid")
+              if paper["state"].get("pending_csv_trade") is not None:
+                  fail("Paper CSV outbox remains unresolved")
+          else:
+              journal = json.loads(Path("execution_journal.json").read_text(encoding="utf-8"))
+              if journal.get("version") != 1 or journal.get("symbol") != "XAUTUSD" or int(journal.get("product_id", -1)) != 131253:
+                  fail("Live execution journal identity/version is invalid")
+              if float(journal.get("managed_position", 999)) != 0 or journal.get("pending_order") is not None:
+                  fail("Live checkpoint is not flat/clean after normal shutdown")
+              sys.path.insert(0, str(Path("private-bot").resolve()))
+              import bot
+              bot.validate_configuration()
+              bot.validate_product_identity()
+              exchange_position = bot.read_stable_position()
+              active_orders = bot.get_open_orders()
+              if exchange_position is None or abs(float(exchange_position)) > bot.POSITION_TOLERANCE:
+                  fail(f"Delta Live position is not verified zero after shutdown: {exchange_position}")
+              if active_orders is None or active_orders:
+                  fail("Delta Live open orders are not verified empty after shutdown")
 
           if "alert_state.json" in records:
               alert = json.loads(Path("alert_state.json").read_text(encoding="utf-8"))
@@ -1270,13 +1606,13 @@ jobs:
           print("Verified checkpoint ready for upload:", ", ".join(sorted(names)))
           PY
 
-      - name: Upload verified Paper state
+      - name: Upload verified mode-specific state
         id: upload_checkpoint
         if: always() && steps.checkpoint.outcome == 'success'
         timeout-minutes: 5
         uses: actions/upload-artifact@v7
         with:
-          name: xaut-paper-state-a${{ github.run_attempt }}
+          name: ${{ inputs.enable_live_trading && 'xaut-live-state-a' || 'xaut-paper-state-a' }}${{ github.run_attempt }}
           path: state-artifact/
           if-no-files-found: error
           retention-days: 30
@@ -1287,7 +1623,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_ARTIFACT_ID: ${{ steps.upload_checkpoint.outputs.artifact-id }}
-          EXPECTED_ARTIFACT_NAME: xaut-paper-state-a${{ github.run_attempt }}
+          EXPECTED_ARTIFACT_NAME: ${{ inputs.enable_live_trading && 'xaut-live-state-a' || 'xaut-paper-state-a' }}${{ github.run_attempt }}
           EXPECTED_ARTIFACT_DIGEST: ${{ steps.upload_checkpoint.outputs.artifact-digest }}
         shell: bash
         run: |
@@ -1319,7 +1655,7 @@ jobs:
           fi
 
           {
-            echo "### Paper checkpoint verification"
+            echo "### ${{ inputs.enable_live_trading && 'LIVE' || 'PAPER' }} checkpoint verification"
             echo "Artifact name: \`${EXPECTED_ARTIFACT_NAME}\`"
             echo "Artifact ID: \`${EXPECTED_ARTIFACT_ID}\`"
             echo "Artifact SHA-256: \`${EXPECTED_ARTIFACT_DIGEST}\`"
