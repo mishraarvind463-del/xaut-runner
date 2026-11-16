@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: xaut-trading-bot
@@ -32,6 +33,41 @@ jobs:
           token: ${{ secrets.BOT_REPO_TOKEN }}
           path: private-bot
           persist-credentials: false
+
+      - name: Restore latest recovery checkpoint
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          echo "Searching recent completed runs for the newest available recovery checkpoint."
+          RUN_IDS=$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "Run XAUT Bot" \
+            --json databaseId,status \
+            --limit 20 \
+            --jq '.[] | select(.status == "completed") | .databaseId')
+          RESTORED=false
+          while IFS= read -r PREVIOUS_RUN_ID; do
+            [ -n "$PREVIOUS_RUN_ID" ] || continue
+            CANDIDATE_DIR=$(mktemp -d)
+            echo "Checking recovery artifact from run $PREVIOUS_RUN_ID."
+            gh run download "$PREVIOUS_RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "xaut-recovery-state-$PREVIOUS_RUN_ID" \
+              --dir "$CANDIDATE_DIR"
+            DOWNLOAD_STATUS=$?
+            if [ "$DOWNLOAD_STATUS" -eq 0 ] && [ -s "$CANDIDATE_DIR/bot_recovery_state.json" ]; then
+              cp "$CANDIDATE_DIR/bot_recovery_state.json" private-bot/bot_recovery_state.json
+              echo "Recovery checkpoint restored from run $PREVIOUS_RUN_ID."
+              RESTORED=true
+              rm -rf "$CANDIDATE_DIR"
+              break
+            fi
+            rm -rf "$CANDIDATE_DIR"
+          done <<< "$RUN_IDS"
+          if [ "$RESTORED" != "true" ]; then
+            echo "No recovery checkpoint found in the last 20 completed runs; bot will reconcile directly with Delta."
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -82,5 +118,14 @@ jobs:
         with:
           name: xaut-trade-history-${{ github.run_id }}
           path: private-bot/trade_history.csv
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Upload recovery checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xaut-recovery-state-${{ github.run_id }}
+          path: private-bot/bot_recovery_state.json
           if-no-files-found: ignore
           retention-days: 30
