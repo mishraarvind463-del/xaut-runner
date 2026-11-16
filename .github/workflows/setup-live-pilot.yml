@@ -352,7 +352,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Run supervised Live bot (5-minute pilot)
+      - name: Run supervised Live bot (15-minute pilot)
         id: run_bot
         if: steps.upload_marker.outcome == 'success'
         timeout-minutes: 25
@@ -361,7 +361,7 @@ jobs:
           API_SECRET: ${{ secrets.API_SECRET }}
           ENABLE_LIVE_TRADING: "true"
           LIVE_TRADING_CONFIRM: ${{ secrets.LIVE_TRADING_CONFIRM }}
-          BOT_RUNTIME_MINUTES: "5"
+          BOT_RUNTIME_MINUTES: "15"
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
