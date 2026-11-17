@@ -8,6 +8,18 @@ on:
         required: true
         type: boolean
         default: false
+      runtime_minutes:
+        description: "Bot runtime in minutes (use 5 for a short test; default is 350)"
+        required: true
+        type: choice
+        options:
+          - "5"
+          - "10"
+          - "30"
+          - "60"
+          - "120"
+          - "350"
+        default: "350"
 
 permissions:
   contents: write
@@ -20,7 +32,7 @@ concurrency:
 jobs:
   bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 360
     permissions:
       contents: write
       actions: read
@@ -259,7 +271,7 @@ jobs:
           REMOTE_RECOVERY_REQUIRED: "true"
           BOT_WATCHDOG_TIMEOUT_SECONDS: "180"
           ENABLE_LIVE_TRADING: ${{ inputs.enable_live_trading && 'true' || 'false' }}
-          BOT_RUNTIME_MINUTES: "350"
+          BOT_RUNTIME_MINUTES: ${{ inputs.runtime_minutes }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
