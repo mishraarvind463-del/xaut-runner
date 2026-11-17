@@ -1,1 +1,1 @@
-{"live_trade_state":null,"pending_order_intent":null,"product_id":131253,"schema_version":2,"updated_at_utc":"2026-11-17T14:09:13.634587+00:00"}
+{"live_trade_state":null,"pending_order_intent":{"client_order_id":"xautdb1fc38c144f459098cfa737","created_at_epoch":1794924557.1626077,"created_at_utc":"2026-11-17T14:09:17.162593+00:00","product_id":131253,"product_symbol":"XAUTUSD","quantity":50,"reduce_only":false,"side":"sell"},"product_id":131253,"schema_version":2,"updated_at_utc":"2026-11-17T14:09:17.163439+00:00"}
