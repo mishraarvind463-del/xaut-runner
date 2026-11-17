@@ -181,7 +181,7 @@ jobs:
           REMOTE_RECOVERY_REQUIRED: "true"
           BOT_WATCHDOG_TIMEOUT_SECONDS: "180"
           ENABLE_LIVE_TRADING: ${{ inputs.enable_live_trading && 'true' || 'false' }}
-          BOT_RUNTIME_MINUTES: "5"
+          BOT_RUNTIME_MINUTES: "350"
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
