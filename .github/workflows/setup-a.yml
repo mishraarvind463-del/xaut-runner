@@ -21,6 +21,9 @@ jobs:
   bot:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    permissions:
+      contents: write
+      actions: read
 
     steps:
       - name: Checkout repository
@@ -33,6 +36,42 @@ jobs:
           token: ${{ secrets.BOT_REPO_TOKEN }}
           path: private-bot
           persist-credentials: false
+
+      - name: Verify and initialize durable recovery branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}"
+          BRANCH="xaut-recovery-state"
+          echo "Checking GitHub token access to ${REPO}."
+          gh api "repos/${REPO}" --jq '{full_name: .full_name, default_branch: .default_branch}'
+
+          if gh api "repos/${REPO}/branches/${BRANCH}" >/dev/null 2>&1; then
+            echo "Recovery branch already exists: ${BRANCH}"
+          else
+            echo "Recovery branch does not exist; creating it from the repository default branch."
+            DEFAULT_BRANCH="$(gh api "repos/${REPO}" --jq '.default_branch')"
+            if [ -z "${DEFAULT_BRANCH}" ] || [ "${DEFAULT_BRANCH}" = "null" ]; then
+              echo "ERROR: GitHub did not return a default branch for ${REPO}."
+              exit 1
+            fi
+            BASE_SHA="$(gh api "repos/${REPO}/branches/${DEFAULT_BRANCH}" --jq '.commit.sha')"
+            if [ -z "${BASE_SHA}" ] || [ "${BASE_SHA}" = "null" ]; then
+              echo "ERROR: Could not read the HEAD commit of default branch ${DEFAULT_BRANCH}."
+              exit 1
+            fi
+
+            if ! gh api --method POST "repos/${REPO}/git/refs" \
+              -f "ref=refs/heads/${BRANCH}" \
+              -f "sha=${BASE_SHA}" >/dev/null; then
+              echo "Branch creation request did not succeed; checking whether another run created it concurrently."
+            fi
+
+            gh api "repos/${REPO}/branches/${BRANCH}" --jq '{name: .name, commit: .commit.sha}'
+            echo "Recovery branch verified: ${BRANCH}"
+          fi
 
       - name: Restore latest recovery checkpoint
         env:
@@ -66,7 +105,7 @@ jobs:
             rm -rf "$CANDIDATE_DIR"
           done <<< "$RUN_IDS"
           if [ "$RESTORED" != "true" ]; then
-            echo "No recovery checkpoint found in the last 100 completed runs; bot will reconcile directly with Delta."
+            echo "No recovery checkpoint found in the last 100 completed runs; bot will initialize a checkpoint after validating exchange state."
           fi
 
       - name: Restore latest trade history
@@ -137,6 +176,7 @@ jobs:
           API_SECRET: ${{ secrets.API_SECRET }}
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          RECOVERY_STATE_REPOSITORY: ${{ github.repository }}
           RECOVERY_STATE_BRANCH: "xaut-recovery-state"
           REMOTE_RECOVERY_REQUIRED: "true"
           BOT_WATCHDOG_TIMEOUT_SECONDS: "180"
