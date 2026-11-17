@@ -143,6 +143,84 @@ jobs:
             echo "No previous trade-history artifact found in the last 100 completed runs; a new history file will be created after the first completed trade."
           fi
 
+      - name: Restore latest AI shadow memory
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set +e
+          CURRENT_FILE="private-bot/ai_memory.json"
+          CURRENT_UPDATED_AT=""
+          if [ -s "$CURRENT_FILE" ] && jq -e '
+            type == "object" and
+            (.schema_version == 1 or .schema_version == 2) and
+            .symbol == "XAUTUSD" and
+            (.model | type == "object") and
+            (.model.weights | type == "object") and
+            (.model.samples | type == "number") and
+            (.evaluations | type == "array") and
+            (.outcomes | type == "array")
+          ' "$CURRENT_FILE" >/dev/null 2>&1; then
+            CURRENT_UPDATED_AT="$(jq -r '.updated_at_utc // .created_at_utc // empty' "$CURRENT_FILE")"
+            echo "Committed AI memory is valid; timestamp: ${CURRENT_UPDATED_AT:-unknown}."
+          else
+            echo "No valid committed AI memory found; a valid prior artifact may be restored."
+          fi
+
+          echo "Searching recent completed runs for the newest valid AI memory artifact."
+          RUN_IDS=$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "Run XAUT Bot" \
+            --json databaseId,status \
+            --limit 100 \
+            --jq '.[] | select(.status == "completed") | .databaseId')
+
+          RESTORED=false
+          while IFS= read -r PREVIOUS_RUN_ID; do
+            [ -n "$PREVIOUS_RUN_ID" ] || continue
+            CANDIDATE_DIR=$(mktemp -d)
+            echo "Checking AI memory artifact from run $PREVIOUS_RUN_ID."
+            gh run download "$PREVIOUS_RUN_ID" \
+              --repo "$GITHUB_REPOSITORY" \
+              --name "xaut-ai-memory-$PREVIOUS_RUN_ID" \
+              --dir "$CANDIDATE_DIR" >/dev/null 2>&1
+            DOWNLOAD_STATUS=$?
+
+            CANDIDATE_FILE="$CANDIDATE_DIR/ai_memory.json"
+            if [ "$DOWNLOAD_STATUS" -eq 0 ] && [ -s "$CANDIDATE_FILE" ] && jq -e '
+              type == "object" and
+              (.schema_version == 1 or .schema_version == 2) and
+              .symbol == "XAUTUSD" and
+              (.model | type == "object") and
+              (.model.weights | type == "object") and
+              (.model.samples | type == "number") and
+              (.evaluations | type == "array") and
+              (.outcomes | type == "array")
+            ' "$CANDIDATE_FILE" >/dev/null 2>&1; then
+              CANDIDATE_UPDATED_AT="$(jq -r '.updated_at_utc // .created_at_utc // empty' "$CANDIDATE_FILE")"
+              if [ -z "$CANDIDATE_UPDATED_AT" ]; then
+                echo "Skipping artifact from run $PREVIOUS_RUN_ID: timestamp is missing."
+                rm -rf "$CANDIDATE_DIR"
+                continue
+              fi
+
+              if [ -z "$CURRENT_UPDATED_AT" ] || [[ "$CANDIDATE_UPDATED_AT" > "$CURRENT_UPDATED_AT" ]]; then
+                cp "$CANDIDATE_FILE" "$CURRENT_FILE"
+                echo "AI memory restored from run $PREVIOUS_RUN_ID (updated ${CANDIDATE_UPDATED_AT})."
+              else
+                echo "Existing AI memory is newer or equal; keeping the committed file."
+              fi
+              RESTORED=true
+              rm -rf "$CANDIDATE_DIR"
+              break
+            fi
+            rm -rf "$CANDIDATE_DIR"
+          done <<< "$RUN_IDS"
+
+          if [ "$RESTORED" != "true" ]; then
+            echo "No valid AI memory artifact found in the last 100 completed runs; keeping the private-bot repository memory."
+          fi
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -198,6 +276,15 @@ jobs:
         with:
           name: xaut-trade-history-${{ github.run_id }}
           path: private-bot/trade_history.csv
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload AI shadow memory
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xaut-ai-memory-${{ github.run_id }}
+          path: private-bot/ai_memory.json
           if-no-files-found: warn
           retention-days: 90
 
