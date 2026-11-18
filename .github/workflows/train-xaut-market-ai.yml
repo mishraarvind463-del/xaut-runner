@@ -76,6 +76,39 @@ jobs:
           --cost-buffer-bps "${{ inputs.cost_buffer_bps }}"
           --output-dir market_ai_output
 
+      - name: Verify event research outputs
+        working-directory: private-bot
+        run: |
+          python - <<'PYCODE'
+          import json
+          from pathlib import Path
+
+          out = Path("market_ai_output")
+          required = [
+              out / "xaut_market_event_dataset.csv.gz",
+              out / "xaut_market_event_model_candidate.json",
+              out / "training_report.json",
+          ]
+          for path in required:
+              if not path.is_file() or path.stat().st_size <= 0:
+                  raise SystemExit(f"Required research output missing or empty: {path}")
+
+          report = json.loads((out / "training_report.json").read_text(encoding="utf-8"))
+          integrity = report.get("event_dataset_integrity", {})
+          if integrity.get("verified") is not True:
+              raise SystemExit("Event dataset integrity verification is absent or failed")
+          if integrity.get("file") != "xaut_market_event_dataset.csv.gz":
+              raise SystemExit("Unexpected event dataset path in training report")
+          if integrity.get("rows", 0) <= 0 or not integrity.get("sha256"):
+              raise SystemExit("Event dataset row count or SHA256 is invalid")
+
+          event_models = report.get("event_models", {})
+          trained = [h for h, result in event_models.items() if result.get("status") == "TRAINED"]
+          if not trained:
+              raise SystemExit("No event horizon model was trained")
+          print(f"Event dataset verified: {integrity['rows']:,} rows; trained horizons: {', '.join(trained)}")
+          PYCODE
+
       - name: Upload research artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -85,8 +118,11 @@ jobs:
             private-bot/market_ai_output/training_report.json
             private-bot/market_ai_output/xaut_market_model_candidate.json
             private-bot/market_ai_output/xaut_market_feature_dataset.csv.gz
-            private-bot/market_ai_output/xaut_market_*_candidate.joblib
+            private-bot/market_ai_output/xaut_market_event_dataset.csv.gz
+            private-bot/market_ai_output/xaut_market_event_model_candidate.json
+            private-bot/market_ai_output/xaut_market_event_*_candidate.joblib
+            private-bot/market_ai_output/xaut_market_[0-9]*m_candidate.joblib
             private-bot/market_ai_output/supertrend_replay_trades.csv
             private-bot/market_ai_output/xautusd_mark_1m_history.csv.gz
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 30
