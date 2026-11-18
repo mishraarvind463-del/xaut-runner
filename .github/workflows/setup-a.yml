@@ -21,6 +21,8 @@ on:
           - "350"
         default: "350"
 
+# The public runner needs read-only access to its own source repository.
+# Private xaut-bot access is provided only by the fine-grained BOT_REPO_TOKEN.
 permissions:
   contents: read
 
@@ -36,8 +38,10 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout repository
+      - name: Checkout public runner repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Checkout private bot
         uses: actions/checkout@v4
@@ -47,49 +51,107 @@ jobs:
           path: private-bot
           persist-credentials: false
 
-      - name: Verify private durable recovery branch
+      - name: Verify and stage private recovery state
         env:
           GH_TOKEN: ${{ secrets.BOT_REPO_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          REPO="mishraarvind463-del/xaut-bot"
-          BRANCH="xaut-recovery-state"
-          echo "Checking private durable recovery repository: ${REPO}."
-          gh api "repos/${REPO}" --jq '{full_name: .full_name, default_branch: .default_branch, private: .private}'
+          PRIVATE_REPO="mishraarvind463-del/xaut-bot"
+          PRIVATE_BRANCH="xaut-recovery-state"
+          TMP_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TMP_DIR"' EXIT
 
-          if gh api "repos/${REPO}/branches/${BRANCH}" >/dev/null 2>&1; then
-            echo "Private recovery branch already exists: ${BRANCH}"
-          else
-            echo "Private recovery branch is not present. It must first be created by the one-time migration workflow in xaut-bot."
-            echo "Refusing to initialize an empty private branch because that could hide unmigrated public recovery data."
-            exit 1
-          fi
+          echo "Checking access to private recovery repository and branch."
+          gh api "repos/${PRIVATE_REPO}/branches/${PRIVATE_BRANCH}" >/dev/null
 
-      - name: Confirm private recovery branch contains migrated state
-        env:
-          GH_TOKEN: ${{ secrets.BOT_REPO_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          REPO="mishraarvind463-del/xaut-bot"
-          BRANCH="xaut-recovery-state"
-          if ! gh api "repos/${REPO}/contents/runtime-state/PRIVATE_STORAGE_MIGRATION.json?ref=${BRANCH}" >/dev/null 2>&1; then
-            echo "ERROR: private recovery migration manifest is missing. Complete and verify the one-time migration first."
-            exit 1
-          fi
-          echo "Private storage migration manifest found."
-          for FILE in \
-            runtime-state/bot_recovery_state.json \
-            runtime-state/trade_history.csv \
-            runtime-state/ai_memory.json \
-            runtime-state/shadow_trade_journal.jsonl.gz; do
-            if gh api "repos/${REPO}/contents/${FILE}?ref=${BRANCH}" >/dev/null 2>&1; then
-              echo "Private recovery data present: ${FILE}"
-            else
-              echo "Private recovery file absent (may be normal for a first run): ${FILE}"
-            fi
-          done
+          fetch_private_file() {
+            local remote_path="$1"
+            local local_path="$2"
+            gh api "repos/${PRIVATE_REPO}/contents/${remote_path}?ref=${PRIVATE_BRANCH}" \
+              --jq '.content' | tr -d '\n' | base64 --decode > "$local_path"
+            test -s "$local_path"
+          }
+
+          fetch_private_file "runtime-state/PRIVATE_STORAGE_MIGRATION.json" "$TMP_DIR/manifest.json"
+          fetch_private_file "runtime-state/bot_recovery_state.json" "$TMP_DIR/bot_recovery_state.json"
+          fetch_private_file "runtime-state/trade_history.csv" "$TMP_DIR/trade_history.csv"
+          fetch_private_file "runtime-state/ai_memory.json" "$TMP_DIR/ai_memory.json"
+          fetch_private_file "runtime-state/shadow_trade_journal.jsonl.gz" "$TMP_DIR/shadow_trade_journal.jsonl.gz"
+
+          python - "$TMP_DIR" <<'PY'
+          import csv
+          import gzip
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+          expected_manifest = {
+              "source_repository": "mishraarvind463-del/xaut-runner",
+              "source_branch": "xaut-recovery-state",
+              "destination_repository": "mishraarvind463-del/xaut-bot",
+              "destination_branch": "xaut-recovery-state",
+          }
+          if manifest.get("migration_complete") is not True:
+              raise SystemExit("Private recovery manifest is not marked complete.")
+          for key, expected in expected_manifest.items():
+              if manifest.get(key) != expected:
+                  raise SystemExit(f"Private recovery manifest mismatch: {key}")
+
+          recovery = json.loads((root / "bot_recovery_state.json").read_text(encoding="utf-8"))
+          if not isinstance(recovery, dict) or recovery.get("product_id") != 131253:
+              raise SystemExit("Private recovery state is not a valid XAUTUSD state object.")
+
+          memory_path = root / "ai_memory.json"
+          memory = json.loads(memory_path.read_text(encoding="utf-8"))
+          if not isinstance(memory, dict) or memory.get("schema_version") not in (1, 2) or memory.get("symbol") != "XAUTUSD":
+              raise SystemExit("Private AI memory is not a supported XAUTUSD memory object.")
+          model = memory.get("model")
+          if not isinstance(model, dict) or not isinstance(model.get("weights"), dict):
+              raise SystemExit("Private AI memory model/weights are missing.")
+          if not isinstance(memory.get("evaluations"), list) or not isinstance(memory.get("outcomes"), list):
+              raise SystemExit("Private AI memory evaluation/outcome arrays are invalid.")
+          required_weights = {"ema_alignment", "momentum", "ema_spread", "candle_strength", "trend_efficiency"}
+          if memory.get("schema_version") == 2:
+              required_weights.update({"multi_timeframe_alignment", "volume_confirmation"})
+          if not required_weights.issubset(model["weights"]):
+              raise SystemExit("Private AI memory is missing required model weights.")
+          samples = model.get("samples", 0)
+          wins = model.get("wins", 0)
+          losses = model.get("losses", 0)
+          if any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in (samples, wins, losses)):
+              raise SystemExit("Private AI memory sample counters are invalid.")
+          if samples != wins + losses:
+              raise SystemExit("Private AI memory sample counters do not reconcile.")
+
+          with (root / "trade_history.csv").open("r", newline="", encoding="utf-8") as stream:
+              reader = csv.DictReader(stream)
+              required_columns = {"symbol", "mode", "direction", "quantity", "entry_time_utc", "exit_time_utc", "net_pnl"}
+              if not reader.fieldnames or not required_columns.issubset(set(reader.fieldnames)):
+                  raise SystemExit("Private trade history CSV is missing required columns.")
+              rows = sum(1 for _ in reader)
+              if rows < 1:
+                  raise SystemExit("Private trade history CSV has no historical rows.")
+
+          journal_bytes = gzip.decompress((root / "shadow_trade_journal.jsonl.gz").read_bytes())
+          for line_number, line in enumerate(journal_bytes.splitlines(), 1):
+              if not line.strip():
+                  continue
+              event = json.loads(line.decode("utf-8"))
+              if not isinstance(event, dict) or not isinstance(event.get("event_type"), str):
+                  raise SystemExit(f"Shadow journal event {line_number} is invalid.")
+
+          print("PASS: private recovery manifest and all state files validated.")
+          print("PASS: private AI memory validated; trade-history rows:", rows)
+          print("PASS: shadow journal gzip validated; event rows:", sum(1 for x in journal_bytes.splitlines() if x.strip()))
+          PY
+
+          # Stage the verified private-branch AI memory into this ephemeral runner
+          # workspace so a stale file on xaut-bot/main cannot outrank migrated memory.
+          cp "$TMP_DIR/ai_memory.json" private-bot/ai_memory.json
+          echo "Verified private AI memory staged in runner workspace."
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -122,8 +184,8 @@ jobs:
         env:
           API_KEY: ${{ secrets.API_KEY }}
           API_SECRET: ${{ secrets.API_SECRET }}
+          # The fine-grained token is scoped only to private xaut-bot.
           GITHUB_TOKEN: ${{ secrets.BOT_REPO_TOKEN }}
-          GITHUB_REPOSITORY: mishraarvind463-del/xaut-bot
           RECOVERY_STATE_REPOSITORY: mishraarvind463-del/xaut-bot
           RECOVERY_STATE_BRANCH: "xaut-recovery-state"
           REMOTE_RECOVERY_REQUIRED: "true"
@@ -139,4 +201,3 @@ jobs:
           ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
         working-directory: private-bot
         run: python -u bot.py
-
