@@ -1,0 +1,65 @@
+name: Purge Legacy Public XAUT Recovery Data
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type DELETE_PUBLIC_XAUT_RECOVERY_DATA only after private migration is verified"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  purge-legacy-public-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require explicit destructive-operation confirmation
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRMATION" != "DELETE_PUBLIC_XAUT_RECOVERY_DATA" ]; then
+            echo "Confirmation did not match. Nothing was deleted."
+            exit 1
+          fi
+
+      - name: Delete legacy public recovery branch and state artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY:?}"
+          BRANCH="xaut-recovery-state"
+
+          echo "Deleting only artifacts with these legacy state prefixes:"
+          echo "  xaut-recovery-state-*"
+          echo "  xaut-trade-history-*"
+          echo "  xaut-ai-memory-*"
+
+          ARTIFACT_IDS="$(gh api --paginate "repos/${REPO}/actions/artifacts?per_page=100" \
+            --jq '.artifacts[]? | select(.name | startswith("xaut-recovery-state-") or startswith("xaut-trade-history-") or startswith("xaut-ai-memory-")) | .id')"
+          if [ -n "$ARTIFACT_IDS" ]; then
+            while IFS= read -r ARTIFACT_ID; do
+              [ -n "$ARTIFACT_ID" ] || continue
+              gh api --method DELETE "repos/${REPO}/actions/artifacts/${ARTIFACT_ID}"
+              echo "Deleted legacy state artifact ID ${ARTIFACT_ID}."
+            done <<< "$ARTIFACT_IDS"
+          else
+            echo "No matching legacy state artifacts found."
+          fi
+
+          if gh api "repos/${REPO}/branches/${BRANCH}" >/dev/null 2>&1; then
+            gh api --method DELETE "repos/${REPO}/git/refs/heads/${BRANCH}"
+            echo "Deleted legacy public recovery branch ${BRANCH}."
+          else
+            echo "Legacy public recovery branch ${BRANCH} does not exist."
+          fi
+
+          echo "Legacy public recovery data references have been removed."
+          echo "This does not erase copies previously downloaded by third parties or guarantee immediate removal of unreachable Git objects."
