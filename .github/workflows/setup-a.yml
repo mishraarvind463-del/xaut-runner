@@ -22,8 +22,7 @@ on:
         default: "350"
 
 permissions:
-  contents: write
-  actions: read
+  contents: read
 
 concurrency:
   group: xaut-trading-bot
@@ -34,8 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
-      contents: write
-      actions: read
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -49,189 +47,49 @@ jobs:
           path: private-bot
           persist-credentials: false
 
-      - name: Verify and initialize durable recovery branch
+      - name: Verify private durable recovery branch
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.BOT_REPO_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-          REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}"
+          REPO="mishraarvind463-del/xaut-bot"
           BRANCH="xaut-recovery-state"
-          echo "Checking GitHub token access to ${REPO}."
-          gh api "repos/${REPO}" --jq '{full_name: .full_name, default_branch: .default_branch}'
+          echo "Checking private durable recovery repository: ${REPO}."
+          gh api "repos/${REPO}" --jq '{full_name: .full_name, default_branch: .default_branch, private: .private}'
 
           if gh api "repos/${REPO}/branches/${BRANCH}" >/dev/null 2>&1; then
-            echo "Recovery branch already exists: ${BRANCH}"
+            echo "Private recovery branch already exists: ${BRANCH}"
           else
-            echo "Recovery branch does not exist; creating it from the repository default branch."
-            DEFAULT_BRANCH="$(gh api "repos/${REPO}" --jq '.default_branch')"
-            if [ -z "${DEFAULT_BRANCH}" ] || [ "${DEFAULT_BRANCH}" = "null" ]; then
-              echo "ERROR: GitHub did not return a default branch for ${REPO}."
-              exit 1
-            fi
-            BASE_SHA="$(gh api "repos/${REPO}/branches/${DEFAULT_BRANCH}" --jq '.commit.sha')"
-            if [ -z "${BASE_SHA}" ] || [ "${BASE_SHA}" = "null" ]; then
-              echo "ERROR: Could not read the HEAD commit of default branch ${DEFAULT_BRANCH}."
-              exit 1
-            fi
-
-            if ! gh api --method POST "repos/${REPO}/git/refs" \
-              -f "ref=refs/heads/${BRANCH}" \
-              -f "sha=${BASE_SHA}" >/dev/null; then
-              echo "Branch creation request did not succeed; checking whether another run created it concurrently."
-            fi
-
-            gh api "repos/${REPO}/branches/${BRANCH}" --jq '{name: .name, commit: .commit.sha}'
-            echo "Recovery branch verified: ${BRANCH}"
+            echo "Private recovery branch is not present. It must first be created by the one-time migration workflow in xaut-bot."
+            echo "Refusing to initialize an empty private branch because that could hide unmigrated public recovery data."
+            exit 1
           fi
 
-      - name: Restore latest recovery checkpoint
+      - name: Confirm private recovery branch contains migrated state
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set +e
-          echo "Searching recent completed runs for the newest available recovery checkpoint."
-          RUN_IDS=$(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow "Run XAUT Bot" \
-            --json databaseId,status \
-            --limit 100 \
-            --jq '.[] | select(.status == "completed") | .databaseId')
-          RESTORED=false
-          while IFS= read -r PREVIOUS_RUN_ID; do
-            [ -n "$PREVIOUS_RUN_ID" ] || continue
-            CANDIDATE_DIR=$(mktemp -d)
-            echo "Checking recovery artifact from run $PREVIOUS_RUN_ID."
-            gh run download "$PREVIOUS_RUN_ID" \
-              --repo "$GITHUB_REPOSITORY" \
-              --name "xaut-recovery-state-$PREVIOUS_RUN_ID" \
-              --dir "$CANDIDATE_DIR"
-            DOWNLOAD_STATUS=$?
-            if [ "$DOWNLOAD_STATUS" -eq 0 ] && [ -s "$CANDIDATE_DIR/bot_recovery_state.json" ]; then
-              cp "$CANDIDATE_DIR/bot_recovery_state.json" private-bot/bot_recovery_state.json
-              echo "Recovery checkpoint restored from run $PREVIOUS_RUN_ID."
-              RESTORED=true
-              rm -rf "$CANDIDATE_DIR"
-              break
-            fi
-            rm -rf "$CANDIDATE_DIR"
-          done <<< "$RUN_IDS"
-          if [ "$RESTORED" != "true" ]; then
-            echo "No recovery checkpoint found in the last 100 completed runs; bot will initialize a checkpoint after validating exchange state."
-          fi
-
-      - name: Restore latest trade history
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set +e
-          echo "Searching recent completed runs for the latest trade-history artifact."
-          RUN_IDS=$(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow "Run XAUT Bot" \
-            --json databaseId,status \
-            --limit 100 \
-            --jq '.[] | select(.status == "completed") | .databaseId')
-          RESTORED=false
-          while IFS= read -r PREVIOUS_RUN_ID; do
-            [ -n "$PREVIOUS_RUN_ID" ] || continue
-            CANDIDATE_DIR=$(mktemp -d)
-            echo "Checking trade-history artifact from run $PREVIOUS_RUN_ID."
-            gh run download "$PREVIOUS_RUN_ID" \
-              --repo "$GITHUB_REPOSITORY" \
-              --name "xaut-trade-history-$PREVIOUS_RUN_ID" \
-              --dir "$CANDIDATE_DIR"
-            DOWNLOAD_STATUS=$?
-            if [ "$DOWNLOAD_STATUS" -eq 0 ] && [ -s "$CANDIDATE_DIR/trade_history.csv" ]; then
-              cp "$CANDIDATE_DIR/trade_history.csv" private-bot/trade_history.csv
-              echo "Trade history restored from run $PREVIOUS_RUN_ID."
-              RESTORED=true
-              rm -rf "$CANDIDATE_DIR"
-              break
-            fi
-            rm -rf "$CANDIDATE_DIR"
-          done <<< "$RUN_IDS"
-          if [ "$RESTORED" != "true" ]; then
-            echo "No previous trade-history artifact found in the last 100 completed runs; a new history file will be created after the first completed trade."
-          fi
-
-      - name: Restore latest AI shadow memory
-        env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.BOT_REPO_TOKEN }}
         shell: bash
         run: |
-          set +e
-          CURRENT_FILE="private-bot/ai_memory.json"
-          CURRENT_UPDATED_AT=""
-          if [ -s "$CURRENT_FILE" ] && jq -e '
-            type == "object" and
-            (.schema_version == 1 or .schema_version == 2) and
-            .symbol == "XAUTUSD" and
-            (.model | type == "object") and
-            (.model.weights | type == "object") and
-            (.model.samples | type == "number") and
-            (.evaluations | type == "array") and
-            (.outcomes | type == "array")
-          ' "$CURRENT_FILE" >/dev/null 2>&1; then
-            CURRENT_UPDATED_AT="$(jq -r '.updated_at_utc // .created_at_utc // empty' "$CURRENT_FILE")"
-            echo "Committed AI memory is valid; timestamp: ${CURRENT_UPDATED_AT:-unknown}."
-          else
-            echo "No valid committed AI memory found; a valid prior artifact may be restored."
+          set -euo pipefail
+          REPO="mishraarvind463-del/xaut-bot"
+          BRANCH="xaut-recovery-state"
+          if ! gh api "repos/${REPO}/contents/runtime-state/PRIVATE_STORAGE_MIGRATION.json?ref=${BRANCH}" >/dev/null 2>&1; then
+            echo "ERROR: private recovery migration manifest is missing. Complete and verify the one-time migration first."
+            exit 1
           fi
-
-          echo "Searching recent completed runs for the newest valid AI memory artifact."
-          RUN_IDS=$(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow "Run XAUT Bot" \
-            --json databaseId,status \
-            --limit 100 \
-            --jq '.[] | select(.status == "completed") | .databaseId')
-
-          RESTORED=false
-          while IFS= read -r PREVIOUS_RUN_ID; do
-            [ -n "$PREVIOUS_RUN_ID" ] || continue
-            CANDIDATE_DIR=$(mktemp -d)
-            echo "Checking AI memory artifact from run $PREVIOUS_RUN_ID."
-            gh run download "$PREVIOUS_RUN_ID" \
-              --repo "$GITHUB_REPOSITORY" \
-              --name "xaut-ai-memory-$PREVIOUS_RUN_ID" \
-              --dir "$CANDIDATE_DIR" >/dev/null 2>&1
-            DOWNLOAD_STATUS=$?
-
-            CANDIDATE_FILE="$CANDIDATE_DIR/ai_memory.json"
-            if [ "$DOWNLOAD_STATUS" -eq 0 ] && [ -s "$CANDIDATE_FILE" ] && jq -e '
-              type == "object" and
-              (.schema_version == 1 or .schema_version == 2) and
-              .symbol == "XAUTUSD" and
-              (.model | type == "object") and
-              (.model.weights | type == "object") and
-              (.model.samples | type == "number") and
-              (.evaluations | type == "array") and
-              (.outcomes | type == "array")
-            ' "$CANDIDATE_FILE" >/dev/null 2>&1; then
-              CANDIDATE_UPDATED_AT="$(jq -r '.updated_at_utc // .created_at_utc // empty' "$CANDIDATE_FILE")"
-              if [ -z "$CANDIDATE_UPDATED_AT" ]; then
-                echo "Skipping artifact from run $PREVIOUS_RUN_ID: timestamp is missing."
-                rm -rf "$CANDIDATE_DIR"
-                continue
-              fi
-
-              if [ -z "$CURRENT_UPDATED_AT" ] || [[ "$CANDIDATE_UPDATED_AT" > "$CURRENT_UPDATED_AT" ]]; then
-                cp "$CANDIDATE_FILE" "$CURRENT_FILE"
-                echo "AI memory restored from run $PREVIOUS_RUN_ID (updated ${CANDIDATE_UPDATED_AT})."
-              else
-                echo "Existing AI memory is newer or equal; keeping the committed file."
-              fi
-              RESTORED=true
-              rm -rf "$CANDIDATE_DIR"
-              break
+          echo "Private storage migration manifest found."
+          for FILE in \
+            runtime-state/bot_recovery_state.json \
+            runtime-state/trade_history.csv \
+            runtime-state/ai_memory.json \
+            runtime-state/shadow_trade_journal.jsonl.gz; do
+            if gh api "repos/${REPO}/contents/${FILE}?ref=${BRANCH}" >/dev/null 2>&1; then
+              echo "Private recovery data present: ${FILE}"
+            else
+              echo "Private recovery file absent (may be normal for a first run): ${FILE}"
             fi
-            rm -rf "$CANDIDATE_DIR"
-          done <<< "$RUN_IDS"
-
-          if [ "$RESTORED" != "true" ]; then
-            echo "No valid AI memory artifact found in the last 100 completed runs; keeping the private-bot repository memory."
-          fi
+          done
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -264,9 +122,9 @@ jobs:
         env:
           API_KEY: ${{ secrets.API_KEY }}
           API_SECRET: ${{ secrets.API_SECRET }}
-          GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          RECOVERY_STATE_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.BOT_REPO_TOKEN }}
+          GITHUB_REPOSITORY: mishraarvind463-del/xaut-bot
+          RECOVERY_STATE_REPOSITORY: mishraarvind463-del/xaut-bot
           RECOVERY_STATE_BRANCH: "xaut-recovery-state"
           REMOTE_RECOVERY_REQUIRED: "true"
           BOT_WATCHDOG_TIMEOUT_SECONDS: "180"
@@ -282,29 +140,3 @@ jobs:
         working-directory: private-bot
         run: python -u bot.py
 
-      - name: Upload trade history
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: xaut-trade-history-${{ github.run_id }}
-          path: private-bot/trade_history.csv
-          if-no-files-found: warn
-          retention-days: 90
-
-      - name: Upload AI shadow memory
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: xaut-ai-memory-${{ github.run_id }}
-          path: private-bot/ai_memory.json
-          if-no-files-found: warn
-          retention-days: 90
-
-      - name: Upload recovery checkpoint
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: xaut-recovery-state-${{ github.run_id }}
-          path: private-bot/bot_recovery_state.json
-          if-no-files-found: ignore
-          retention-days: 90
