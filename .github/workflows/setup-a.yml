@@ -114,8 +114,31 @@ jobs:
               raise SystemExit("Private AI memory model/weights are missing.")
           if not isinstance(memory.get("evaluations"), list) or not isinstance(memory.get("outcomes"), list):
               raise SystemExit("Private AI memory evaluation/outcome arrays are invalid.")
-          if memory.get("schema_version") == 3 and not isinstance(memory.get("counterfactual_outcomes"), list):
-              raise SystemExit("Private AI memory counterfactual outcome array is invalid.")
+          if memory.get("schema_version") == 3:
+              counterfactual_outcomes = memory.get("counterfactual_outcomes")
+              if not isinstance(counterfactual_outcomes, list):
+                  raise SystemExit("Private AI memory counterfactual outcome array is invalid.")
+              seen_counterfactual = set()
+              allowed_statuses = {"LABELLED", "SKIPPED_MISSING_TARGET_CANDLE", "SKIPPED_GAPPED_FUTURE_PATH"}
+              for index, item in enumerate(counterfactual_outcomes):
+                  if not isinstance(item, dict):
+                      raise SystemExit(f"Private AI counterfactual outcome {index} is not an object.")
+                  evaluation_id = item.get("evaluation_id")
+                  horizon = item.get("horizon_minutes")
+                  status = item.get("status")
+                  label = item.get("label")
+                  if not isinstance(evaluation_id, str) or not evaluation_id or horizon not in (15, 30, 60):
+                      raise SystemExit(f"Private AI counterfactual outcome {index} has invalid identity/horizon.")
+                  key = (evaluation_id, horizon)
+                  if key in seen_counterfactual:
+                      raise SystemExit("Private AI counterfactual outcomes contain a duplicate evaluation/horizon.")
+                  seen_counterfactual.add(key)
+                  if status not in allowed_statuses:
+                      raise SystemExit(f"Private AI counterfactual outcome {index} has an unsupported status.")
+                  if (status == "LABELLED" and label not in ("FAVOURABLE", "ADVERSE", "NEUTRAL")) or (status != "LABELLED" and label is not None):
+                      raise SystemExit(f"Private AI counterfactual outcome {index} has an inconsistent label/status.")
+                  if item.get("execution_allowed") is not False or item.get("used_for_live_weight_update") is not False:
+                      raise SystemExit(f"Private AI counterfactual outcome {index} is not marked research-only.")
           required_weights = {"ema_alignment", "momentum", "ema_spread", "candle_strength", "trend_efficiency"}
           if memory.get("schema_version") in (2, 3):
               required_weights.update({"multi_timeframe_alignment", "volume_confirmation"})
