@@ -2,16 +2,16 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-19T19:39:36+05:30
+- Update timestamp (UTC): 2026-11-19T20:35:36+05:30
 - Branch: `main`
-- Commit: `b006dd06e5f3ae9364fc76e7fc754e819d34483c`
-- Commit message: fix: classify documentation-only context updates correctly
+- Commit: `e6a6284eb4271e10f166fd53a6fcd17f73158153`
+- Commit message: Accept AI memory schema v3 in runner preflight
 - Commit author: mishraarvind463-del
-- Context review: No runner config/source paths were detected in this push.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44540738170
+- Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44550893513
 
 ## Changed paths
-- `M	.github/workflows/update-runner-project-status.yml`
+- `M	.github/workflows/setup-a.yml`
 
 ## Required before changing runner behaviour
 1. Review `.github/workflows/setup-a.yml` and the exact diff.
