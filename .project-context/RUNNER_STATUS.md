@@ -1,15 +1,20 @@
 # XAUT Runner — Current Status
 
-> Initial baseline. Automatically refreshed after pushes to runner `main`.
+> Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Repository: `mishraarvind463-del/xaut-runner`
+- Update timestamp (UTC): 2026-11-19T19:36:49+05:30
 - Branch: `main`
-- Audited HEAD: `177a0143cab2afb668cee2f08bafa5fd4084d20a`
-- Private bot checkout: `mishraarvind463-del/xaut-bot`, branch `ai-managed-trading-v1`
-- Main workflow: `.github/workflows/setup-a.yml` — manual Run XAUT Bot dispatch.
-- Safety defaults verified at audit: live trading false; runtime choices 5/10/30/60/120/350 minutes; 90-second Delta IP-whitelist wait; 360-minute job timeout.
-- This status file is updated automatically with the latest runner commit and changed paths. It does not interpret workflow semantics or validate secrets.
-- Read the private bot repository's `PROJECT_CONTEXT.md` and `.project-context/HANDOVER.md` for the complete project context.
+- Commit: `b74d9daa49854eede13d13d5de82fa801cd1c933`
+- Commit message: docs: add runner status and automatic context refresh
+- Commit author: mishraarvind463-del
+- Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44540265050
 
-## Required review
-Check the workflow diff and verify its private-bot checkout ref and all safety gates after any runner workflow/configuration change. Never dispatch the Delta-connected Run XAUT Bot workflow without explicit user approval.
+## Changed paths
+- `A	.github/workflows/update-runner-project-status.yml`
+
+## Required before changing runner behaviour
+1. Review `.github/workflows/setup-a.yml` and the exact diff.
+2. Confirm private checkout stays on `ai-managed-trading-v1` unless the user approves otherwise.
+3. Keep live trading default false and preserve manual dispatch / IP whitelist safeguards unless explicitly approved.
+4. Do not start the Delta-connected trading workflow as part of documentation maintenance.
