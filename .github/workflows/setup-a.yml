@@ -107,15 +107,17 @@ jobs:
 
           memory_path = root / "ai_memory.json"
           memory = json.loads(memory_path.read_text(encoding="utf-8"))
-          if not isinstance(memory, dict) or memory.get("schema_version") not in (1, 2) or memory.get("symbol") != "XAUTUSD":
+          if not isinstance(memory, dict) or memory.get("schema_version") not in (1, 2, 3) or memory.get("symbol") != "XAUTUSD":
               raise SystemExit("Private AI memory is not a supported XAUTUSD memory object.")
           model = memory.get("model")
           if not isinstance(model, dict) or not isinstance(model.get("weights"), dict):
               raise SystemExit("Private AI memory model/weights are missing.")
           if not isinstance(memory.get("evaluations"), list) or not isinstance(memory.get("outcomes"), list):
               raise SystemExit("Private AI memory evaluation/outcome arrays are invalid.")
+          if memory.get("schema_version") == 3 and not isinstance(memory.get("counterfactual_outcomes"), list):
+              raise SystemExit("Private AI memory counterfactual outcome array is invalid.")
           required_weights = {"ema_alignment", "momentum", "ema_spread", "candle_strength", "trend_efficiency"}
-          if memory.get("schema_version") == 2:
+          if memory.get("schema_version") in (2, 3):
               required_weights.update({"multi_timeframe_alignment", "volume_confirmation"})
           if not required_weights.issubset(model["weights"]):
               raise SystemExit("Private AI memory is missing required model weights.")
