@@ -2,13 +2,13 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-19T20:35:36+05:30
+- Update timestamp (UTC): 2026-11-19T20:43:18+05:30
 - Branch: `main`
-- Commit: `e6a6284eb4271e10f166fd53a6fcd17f73158153`
-- Commit message: Accept AI memory schema v3 in runner preflight
+- Commit: `3cb78852f7e7702620a0814e6c2cbdabf8cb06ed`
+- Commit message: Strictly validate schema v3 counterfactual AI state
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44550893513
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44552328784
 
 ## Changed paths
 - `M	.github/workflows/setup-a.yml`
