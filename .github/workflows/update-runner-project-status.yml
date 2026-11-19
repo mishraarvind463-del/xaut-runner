@@ -57,14 +57,11 @@ jobs:
               )
               changed = [line for line in result.stdout.splitlines() if line]
 
-          changed = [
-              line for line in changed
-              if not line.endswith(".project-context/RUNNER_STATUS.md")
-          ]
+          paths = [line.split("\t")[-1] for line in changed]
           config_paths = [
-              line for line in changed
-              if not line.startswith(".project-context/")
-              and line != ".github/workflows/update-runner-project-status.yml"
+              path for path in paths
+              if not path.startswith(".project-context/")
+              and path != ".github/workflows/update-runner-project-status.yml"
           ]
           message = (head.get("message") or subprocess.check_output(
               ["git", "log", "-1", "--pretty=%s"], text=True
