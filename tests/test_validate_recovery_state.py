@@ -214,10 +214,20 @@ class RecoveryStateValidatorTests(unittest.TestCase):
         )
         workflow = workflow_path.read_text(encoding="utf-8")
 
-        validator_call = 'python scripts/validate_recovery_state.py "$TMP_DIR"'
-        stage_call = 'cp "$TMP_DIR/ai_memory.json" private-bot/ai_memory.json'
-        self.assertIn(validator_call, workflow)
-        self.assertLess(workflow.index(validator_call), workflow.index(stage_call))
+        prepare_script_path = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "prepare_private_recovery.sh"
+        )
+        prepare_script = prepare_script_path.read_text(encoding="utf-8")
+        self.assertIn("run: bash scripts/prepare_private_recovery.sh", workflow)
+        validator_call = 'python "$SCRIPT_DIR/validate_recovery_state.py" "$TMP_DIR"'
+        stage_call = 'cp "$TMP_DIR/ai_memory.json" "$BOT_WORKSPACE/ai_memory.json"'
+        self.assertIn(validator_call, prepare_script)
+        self.assertLess(prepare_script.index(validator_call), prepare_script.index(stage_call))
+        self.assertIn("PRIVATE_REPO: mishraarvind463-del/xaut-bot", workflow)
+        self.assertIn("PRIVATE_BRANCH: xaut-recovery-state", workflow)
+        self.assertIn("BOT_WORKSPACE: private-bot", workflow)
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("default: false", workflow)
         self.assertIn("ref: ai-managed-trading-v1", workflow)
