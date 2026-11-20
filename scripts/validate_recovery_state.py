@@ -221,11 +221,16 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
         evaluation_id, trade_id = outcome.get("evaluation_id"), outcome.get("trade_id")
         if (
             not isinstance(evaluation_id, str)
+            or not evaluation_id
             or not isinstance(trade_id, str)
-            or evaluation_id not in source_by_id
-            or _canonical(outcome) != _canonical(source_by_id[evaluation_id])
+            or not trade_id
         ):
-            raise RecoveryValidationError("Schema-v4 active outcome is not an exact source-v3 outcome.")
+            raise RecoveryValidationError("Schema-v4 active outcome identity is invalid.")
+        if evaluation_id in source_by_id:
+            if _canonical(outcome) != _canonical(source_by_id[evaluation_id]):
+                raise RecoveryValidationError("Schema-v4 active source outcome differs from immutable v3 archive.")
+        elif migration_id != "verified-only-v1":
+            raise RecoveryValidationError("Native schema-v4 active outcome is missing from its canonical outcome array.")
         if evaluation_id in active_by_id or trade_id in active_trades:
             raise RecoveryValidationError("Schema-v4 active outcomes contain duplicate identities.")
         active_by_id[evaluation_id] = outcome
@@ -246,8 +251,12 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
         ):
             raise RecoveryValidationError("Schema-v4 legacy outcomes are not a unique value-preserving archive.")
         legacy_by_id[evaluation_id] = outcome
-    if set(active_by_id).intersection(legacy_by_id) or set(active_by_id).union(legacy_by_id) != set(source_by_id):
-        raise RecoveryValidationError("Schema-v4 active and legacy outcomes do not exactly partition the source outcomes.")
+    active_source_ids = set(active_by_id).intersection(source_by_id)
+    if (
+        active_source_ids.intersection(legacy_by_id)
+        or active_source_ids.union(legacy_by_id) != set(source_by_id)
+    ):
+        raise RecoveryValidationError("Schema-v4 initial active and legacy outcomes do not exactly partition the source outcomes.")
     if (
         migration.get("active_outcome_count") != len(active_outcomes)
         or migration.get("legacy_outcome_count") != len(legacy_outcomes)
