@@ -182,10 +182,43 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
             raise RecoveryValidationError("Schema-v4 immutable archive is not the original XAUTUSD schema-v3 memory.")
         if archive.get("model") != legacy_model:
             raise RecoveryValidationError("Schema-v4 legacy model snapshot differs from immutable v3 archive.")
-        if archive.get("evaluations") != memory.get("evaluations"):
-            raise RecoveryValidationError("Schema-v4 evaluations differ from immutable v3 archive.")
-        if archive.get("counterfactual_outcomes") != memory.get("counterfactual_outcomes"):
-            raise RecoveryValidationError("Schema-v4 counterfactual outcomes differ from immutable v3 archive.")
+        archived_evaluations = archive.get("evaluations")
+        current_evaluations = memory.get("evaluations")
+        if not isinstance(archived_evaluations, list) or not isinstance(current_evaluations, list):
+            raise RecoveryValidationError("Schema-v4 archive/current evaluations are invalid.")
+        current_evaluations_by_id = {
+            item.get("evaluation_id"): item
+            for item in current_evaluations
+            if isinstance(item, dict) and isinstance(item.get("evaluation_id"), str)
+        }
+        if len(current_evaluations_by_id) != len(current_evaluations):
+            raise RecoveryValidationError("Schema-v4 current evaluation identities are missing or duplicated.")
+        for archived_event in archived_evaluations:
+            if (
+                not isinstance(archived_event, dict)
+                or current_evaluations_by_id.get(archived_event.get("evaluation_id")) is None
+                or _canonical(current_evaluations_by_id[archived_event["evaluation_id"]]) != _canonical(archived_event)
+            ):
+                raise RecoveryValidationError("Schema-v4 original evaluations are not preserved in the current memory.")
+
+        archived_counterfactuals = archive.get("counterfactual_outcomes")
+        current_counterfactuals = memory.get("counterfactual_outcomes")
+        if not isinstance(archived_counterfactuals, list) or not isinstance(current_counterfactuals, list):
+            raise RecoveryValidationError("Schema-v4 archive/current counterfactual outcomes are invalid.")
+        current_counterfactual_by_key = {
+            (item.get("evaluation_id"), item.get("horizon_minutes")): item
+            for item in current_counterfactuals
+            if isinstance(item, dict)
+        }
+        if len(current_counterfactual_by_key) != len(current_counterfactuals):
+            raise RecoveryValidationError("Schema-v4 current counterfactual identities are duplicated or invalid.")
+        for archived_item in archived_counterfactuals:
+            if (
+                not isinstance(archived_item, dict)
+                or current_counterfactual_by_key.get((archived_item.get("evaluation_id"), archived_item.get("horizon_minutes"))) is None
+                or _canonical(current_counterfactual_by_key[(archived_item["evaluation_id"], archived_item["horizon_minutes"])]) != _canonical(archived_item)
+            ):
+                raise RecoveryValidationError("Schema-v4 original counterfactual outcomes are not preserved.")
         source_outcomes = archive.get("outcomes")
         if not isinstance(source_outcomes, list):
             raise RecoveryValidationError("Immutable v3 archive outcomes are invalid.")
