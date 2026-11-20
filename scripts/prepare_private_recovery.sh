@@ -25,7 +25,14 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "Checking read access to the private recovery repository and branch."
-gh api "repos/$PRIVATE_REPO/branches/$PRIVATE_BRANCH" >/dev/null
+if ! api_error="$(gh api "repos/$PRIVATE_REPO/branches/$PRIVATE_BRANCH" 2>&1 >/dev/null)"; then
+  echo "GitHub API access check failed for $PRIVATE_REPO branch $PRIVATE_BRANCH." >&2
+  # Print the CLI's HTTP/authentication diagnostic, but never expose a token.
+  printf '%s\n' "$api_error" | sed -E \
+    -e 's/github_pat_[A-Za-z0-9_]+/[REDACTED]/g' \
+    -e 's/gh[pousr]_[A-Za-z0-9_]+/[REDACTED]/g' >&2
+  exit 1
+fi
 
 fetch_private_file() {
   local remote_path="$1"
