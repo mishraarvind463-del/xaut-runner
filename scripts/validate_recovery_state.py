@@ -247,7 +247,7 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
             if (
                 not isinstance(archived_item, dict)
                 or current_counterfactual_by_key.get((archived_item.get("evaluation_id"), archived_item.get("horizon_minutes"))) is None
-                or _canonical(current_counterfactual_by_key[(archived_item["evaluation_id"], archived_item["horizon_minutes"])]) != _canonical(archived_item)
+                or _canonical_learning_evidence(current_counterfactual_by_key[(archived_item["evaluation_id"], archived_item["horizon_minutes"])]) != _canonical_learning_evidence(archived_item)
             ):
                 raise RecoveryValidationError("Schema-v4 original counterfactual outcomes are not preserved.")
         source_outcomes = archive.get("outcomes")
@@ -291,7 +291,7 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
         ):
             raise RecoveryValidationError("Schema-v4 active outcome identity is invalid.")
         if evaluation_id in source_by_id:
-            if _canonical(outcome) != _canonical(source_by_id[evaluation_id]):
+            if _canonical_learning_evidence(outcome) != _canonical_learning_evidence(source_by_id[evaluation_id]):
                 raise RecoveryValidationError("Schema-v4 active source outcome differs from immutable v3 archive.")
         elif migration_id != "verified-only-v1":
             raise RecoveryValidationError("Native schema-v4 active outcome is missing from its canonical outcome array.")
@@ -316,7 +316,7 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
             or not trade_id
             or trade_id in legacy_trades
             or trade_id in active_trades
-            or _canonical(outcome) != _canonical(source_by_id[evaluation_id])
+            or _canonical_learning_evidence(outcome) != _canonical_learning_evidence(source_by_id[evaluation_id])
             or evaluation_id in legacy_by_id
         ):
             raise RecoveryValidationError("Schema-v4 legacy outcomes are not a unique value-preserving archive.")
