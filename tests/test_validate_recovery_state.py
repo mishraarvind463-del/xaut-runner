@@ -4,6 +4,8 @@ import copy
 import csv
 import gzip
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -226,6 +228,87 @@ class RecoveryStateValidatorTests(unittest.TestCase):
         self.assertIn("BOT_RUNTIME_MINUTES: ${{ inputs.runtime_minutes }}", workflow)
         self.assertIn("run: python -u bot.py", workflow)
         self.assertNotIn("<<'PY'", workflow)
+
+
+    def _run_staging_script(self, *, valid=True):
+        root = Path(__file__).resolve().parents[1]
+        script = root / "scripts" / "prepare_private_recovery.sh"
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir(exist_ok=True)
+        fake_gh = fake_bin / "gh"
+        fake_gh.write_text(
+            "#!/usr/bin/env python3\\n"
+            "import base64, os, sys\\n"
+            "args = sys.argv[1:]\\n"
+            "if len(args) < 2 or args[0] != 'api': sys.exit(2)\\n"
+            "endpoint = args[1]\\n"
+            "if '/branches/' in endpoint: print('{}'); sys.exit(0)\\n"
+            "remote = endpoint.split('/contents/', 1)[1].split('?ref=', 1)[0]\\n"
+            "names = {"
+            "'runtime-state/PRIVATE_STORAGE_MIGRATION.json': 'manifest.json', "
+            "'runtime-state/bot_recovery_state.json': 'bot_recovery_state.json', "
+            "'runtime-state/trade_history.csv': 'trade_history.csv', "
+            "'runtime-state/ai_memory.json': 'ai_memory.json', "
+            "'runtime-state/shadow_trade_journal.jsonl.gz': 'shadow_trade_journal.jsonl.gz'}\\n"
+            "name = names.get(remote)\\n"
+            "if name is None: sys.exit(3)\\n"
+            "path = os.path.join(os.environ['FAKE_GH_FIXTURE_ROOT'], name)\\n"
+            "with open(path, 'rb') as handle: print(base64.b64encode(handle.read()).decode('ascii'))\\n",
+            encoding="utf-8",
+        )
+        fake_gh.chmod(0o755)
+
+        if not valid:
+            manifest = json.loads((self.root / "manifest.json").read_text(encoding="utf-8"))
+            manifest["migration_complete"] = False
+            self.write_json("manifest.json", manifest)
+
+        workspace = self.root / "private-bot"
+        workspace.mkdir(exist_ok=True)
+        sentinel = workspace / "do-not-touch.txt"
+        sentinel.write_text("preserve this workspace file", encoding="utf-8")
+
+        env = os.environ.copy()
+        env.update({
+            "PATH": str(fake_bin) + os.pathsep + env.get("PATH", ""),
+            "GH_TOKEN": "offline-fixture-token",
+            "PRIVATE_REPO": "fixture/private-bot",
+            "PRIVATE_BRANCH": "xaut-recovery-state",
+            "BOT_WORKSPACE": str(workspace),
+            "FAKE_GH_FIXTURE_ROOT": str(self.root),
+        })
+        result = subprocess.run(
+            ["bash", str(script)],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        return result, workspace, sentinel
+
+    def test_prepare_script_fetches_validates_and_stages_exact_memory_bytes(self):
+        result, workspace, sentinel = self._run_staging_script(valid=True)
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        self.assertIn("PASS: private recovery manifest", result.stdout)
+        self.assertIn("Verified private AI memory staged", result.stdout)
+        self.assertEqual(
+            (workspace / "ai_memory.json").read_bytes(),
+            (self.root / "ai_memory.json").read_bytes(),
+        )
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve this workspace file")
+        self.assertEqual(
+            {item.name for item in workspace.iterdir()},
+            {"do-not-touch.txt", "ai_memory.json"},
+        )
+
+    def test_prepare_script_fails_closed_before_staging_invalid_snapshot(self):
+        result, workspace, sentinel = self._run_staging_script(valid=False)
+        self.assertNotEqual(result.returncode, 0, msg=result.stdout)
+        self.assertIn("FAIL: Private recovery manifest is not marked complete.", result.stderr)
+        self.assertFalse((workspace / "ai_memory.json").exists())
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve this workspace file")
 
 
 if __name__ == "__main__":
