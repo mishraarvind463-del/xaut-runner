@@ -2,16 +2,16 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-20T11:08:24+05:30
+- Update timestamp (UTC): 2026-11-20T13:01:51+05:30
 - Branch: `main`
-- Commit: `ccd9e2dcf3711a164820418dadf2d14a7f4053fe`
-- Commit message: Reject duplicate trade IDs across v4 active and legacy outcomes
+- Commit: `15d60d16cc80db86677d36db1671401c1dd0ec8f`
+- Commit message: Show private recovery API access error details
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44682365137
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44695640295
 
 ## Changed paths
-- `M	scripts/validate_recovery_state.py`
+- `M	scripts/prepare_private_recovery.sh`
 
 ## Required before changing runner behaviour
 1. Review `.github/workflows/setup-a.yml` and the exact diff.
