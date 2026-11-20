@@ -55,37 +55,11 @@ jobs:
       - name: Verify and stage private recovery state
         env:
           GH_TOKEN: ${{ secrets.BOT_REPO_TOKEN }}
+          PRIVATE_REPO: mishraarvind463-del/xaut-bot
+          PRIVATE_BRANCH: xaut-recovery-state
+          BOT_WORKSPACE: private-bot
         shell: bash
-        run: |
-          set -euo pipefail
-          PRIVATE_REPO="mishraarvind463-del/xaut-bot"
-          PRIVATE_BRANCH="xaut-recovery-state"
-          TMP_DIR="$(mktemp -d)"
-          trap 'rm -rf "$TMP_DIR"' EXIT
-
-          echo "Checking access to private recovery repository and branch."
-          gh api "repos/${PRIVATE_REPO}/branches/${PRIVATE_BRANCH}" >/dev/null
-
-          fetch_private_file() {
-            local remote_path="$1"
-            local local_path="$2"
-            gh api "repos/${PRIVATE_REPO}/contents/${remote_path}?ref=${PRIVATE_BRANCH}" \
-              --jq '.content' | tr -d '\n' | base64 --decode > "$local_path"
-            test -s "$local_path"
-          }
-
-          fetch_private_file "runtime-state/PRIVATE_STORAGE_MIGRATION.json" "$TMP_DIR/manifest.json"
-          fetch_private_file "runtime-state/bot_recovery_state.json" "$TMP_DIR/bot_recovery_state.json"
-          fetch_private_file "runtime-state/trade_history.csv" "$TMP_DIR/trade_history.csv"
-          fetch_private_file "runtime-state/ai_memory.json" "$TMP_DIR/ai_memory.json"
-          fetch_private_file "runtime-state/shadow_trade_journal.jsonl.gz" "$TMP_DIR/shadow_trade_journal.jsonl.gz"
-
-          python scripts/validate_recovery_state.py "$TMP_DIR"
-
-          # Stage the verified private-branch AI memory into this ephemeral runner
-          # workspace so a stale file on xaut-bot/main cannot outrank migrated memory.
-          cp "$TMP_DIR/ai_memory.json" private-bot/ai_memory.json
-          echo "Verified private AI memory staged in runner workspace."
+        run: bash scripts/prepare_private_recovery.sh
 
       - name: Setup Python
         uses: actions/setup-python@v5
