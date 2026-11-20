@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Download, validate and stage the private recovery snapshot.
-# GH_TOKEN must be supplied by the caller. This script never writes to the
-# remote recovery branch; it only reads GitHub Contents API responses and
-# copies the validated AI-memory bytes into the ephemeral bot checkout.
+# GH_TOKEN must be supplied by the caller. This script only reads the private
+# recovery branch and copies validated AI-memory bytes into the ephemeral bot checkout.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
@@ -24,21 +23,25 @@ fi
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-echo "Checking read access to the private recovery repository and branch."
-if ! api_error="$(gh api "repos/$PRIVATE_REPO/branches/$PRIVATE_BRANCH" 2>&1)"; then
-  echo "GitHub API access check failed for $PRIVATE_REPO branch $PRIVATE_BRANCH." >&2
-  # Print the CLI's HTTP/authentication diagnostic, but never expose a token.
-  printf '%s\n' "$api_error" | sed -E \
-    -e 's/github_pat_[A-Za-z0-9_]+/[REDACTED]/g' \
-    -e 's/gh[pousr]_[A-Za-z0-9_]+/[REDACTED]/g' >&2
+# Use the same Git read path that successfully checked out the private bot.
+# This avoids depending on gh CLI/API authentication for the recovery branch.
+echo "Fetching private recovery branch through authenticated Git."
+AUTH_HEADER="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+git -C "$TMP_DIR" init -q
+if ! git -C "$TMP_DIR" -c http.extraheader="$AUTH_HEADER" fetch --quiet --no-tags --depth=1 \
+  "https://github.com/$PRIVATE_REPO.git" "refs/heads/$PRIVATE_BRANCH"; then
+  echo "Unable to fetch $PRIVATE_REPO branch $PRIVATE_BRANCH using BOT_REPO_TOKEN." >&2
+  echo "Check that the fine-grained token includes xaut-bot with Contents: Read-only." >&2
   exit 1
 fi
 
 fetch_private_file() {
   local remote_path="$1"
   local local_path="$2"
-  gh api "repos/$PRIVATE_REPO/contents/$remote_path?ref=$PRIVATE_BRANCH" \
-    --jq '.content' | tr -d '\n' | base64 --decode > "$local_path"
+  if ! git -C "$TMP_DIR" show "FETCH_HEAD:$remote_path" > "$local_path"; then
+    echo "Required recovery file is missing from $PRIVATE_BRANCH: $remote_path" >&2
+    exit 1
+  fi
   test -s "$local_path"
 }
 
