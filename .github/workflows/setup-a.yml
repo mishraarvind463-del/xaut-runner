@@ -94,6 +94,8 @@ jobs:
           API_SECRET: ${{ secrets.API_SECRET }}
           # The fine-grained token is scoped only to private xaut-bot.
           GITHUB_TOKEN: ${{ secrets.BOT_REPO_TOKEN }}
+          # Separate fine-grained token scoped only to xaut-ai-queue.
+          QWEN_QUEUE_TOKEN: ${{ secrets.QWEN_QUEUE_TOKEN }}
           RECOVERY_STATE_REPOSITORY: mishraarvind463-del/xaut-bot
           RECOVERY_STATE_BRANCH: "xaut-recovery-state"
           REMOTE_RECOVERY_REQUIRED: "true"
