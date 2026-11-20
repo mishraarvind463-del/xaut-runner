@@ -25,7 +25,7 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "Checking read access to the private recovery repository and branch."
-if ! api_error="$(gh api "repos/$PRIVATE_REPO/branches/$PRIVATE_BRANCH" 2>&1 >/dev/null)"; then
+if ! api_error="$(gh api "repos/$PRIVATE_REPO/branches/$PRIVATE_BRANCH" 2>&1)"; then
   echo "GitHub API access check failed for $PRIVATE_REPO branch $PRIVATE_BRANCH." >&2
   # Print the CLI's HTTP/authentication diagnostic, but never expose a token.
   printf '%s\n' "$api_error" | sed -E \
