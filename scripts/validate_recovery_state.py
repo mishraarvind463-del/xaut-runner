@@ -194,12 +194,22 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
         if len(current_evaluations_by_id) != len(current_evaluations):
             raise RecoveryValidationError("Schema-v4 current evaluation identities are missing or duplicated.")
         for archived_event in archived_evaluations:
-            if (
-                not isinstance(archived_event, dict)
-                or current_evaluations_by_id.get(archived_event.get("evaluation_id")) is None
-                or _canonical(current_evaluations_by_id[archived_event["evaluation_id"]]) != _canonical(archived_event)
-            ):
-                raise RecoveryValidationError("Schema-v4 original evaluations are not preserved in the current memory.")
+            current_event = (
+                current_evaluations_by_id.get(archived_event.get("evaluation_id"))
+                if isinstance(archived_event, dict)
+                else None
+            )
+            if current_event is None:
+                raise RecoveryValidationError("Schema-v4 original evaluation is missing from the current memory.")
+            archived_snapshot = dict(archived_event)
+            current_snapshot = dict(current_event)
+            # Counterfactual completion metadata is allowed to advance after the
+            # v3 snapshot; all learning/identity fields remain immutable.
+            for mutable_field in ("counterfactual_horizons_recorded", "counterfactual_complete"):
+                archived_snapshot.pop(mutable_field, None)
+                current_snapshot.pop(mutable_field, None)
+            if _canonical(current_snapshot) != _canonical(archived_snapshot):
+                raise RecoveryValidationError("Schema-v4 original evaluation learning evidence changed.")
 
         archived_counterfactuals = archive.get("counterfactual_outcomes")
         current_counterfactuals = memory.get("counterfactual_outcomes")
