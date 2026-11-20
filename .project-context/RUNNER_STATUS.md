@@ -2,13 +2,13 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-20T17:12:50+05:30
+- Update timestamp (UTC): 2026-11-20T17:13:25+05:30
 - Branch: `main`
-- Commit: `0325ad3177c3a178f9bdda3b67c5ac143d788bf0`
-- Commit message: test: cover numeric JSON round-trip for archived outcomes
+- Commit: `17cb1e24107d56a315f25c556249a603d436db25`
+- Commit message: test: isolate active archived outcome identity tampering
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44729833345
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44729910129
 
 ## Changed paths
 - `M	tests/test_validate_recovery_state.py`
