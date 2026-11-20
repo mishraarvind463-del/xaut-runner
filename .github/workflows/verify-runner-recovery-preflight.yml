@@ -45,3 +45,12 @@ jobs:
 
       - name: Run disposable fixture tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Validate actual private recovery checkpoint
+        env:
+          GH_TOKEN: ${{ secrets.BOT_REPO_TOKEN }}
+          PRIVATE_REPO: mishraarvind463-del/xaut-bot
+          PRIVATE_BRANCH: xaut-recovery-state
+          BOT_WORKSPACE: ${{ runner.temp }}/private-bot
+        run: |
+          mkdir -p "$BOT_WORKSPACE"
+          bash scripts/prepare_private_recovery.sh
