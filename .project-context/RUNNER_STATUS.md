@@ -2,16 +2,16 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-20T09:31:52+05:30
+- Update timestamp (UTC): 2026-11-20T09:32:37+05:30
 - Branch: `main`
-- Commit: `63ce027e320b26ff4901ba37b920dff81ab82142`
-- Commit message: test: extract offline private recovery snapshot validator
+- Commit: `a7159ef425d6c71517767e3bbef3f024f63d8855`
+- Commit message: test: add disposable recovery snapshot validator fixtures
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44671646110
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44671728558
 
 ## Changed paths
-- `A	scripts/validate_recovery_state.py`
+- `A	tests/test_validate_recovery_state.py`
 
 ## Required before changing runner behaviour
 1. Review `.github/workflows/setup-a.yml` and the exact diff.
