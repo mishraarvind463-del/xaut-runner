@@ -271,6 +271,66 @@ class RecoveryStateValidatorTests(unittest.TestCase):
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve this workspace file")
 
 
+
+    def test_verified_only_v4_accepts_new_verified_outcomes_after_migration(self):
+        self.write_valid_v4_fixture()
+        memory = self.read_memory()
+        features = {name: 0.25 for name in V4_FEATURE_NAMES}
+        metadata = {
+            "source": "PAPER_ESTIMATED",
+            "currency": "USD",
+            "gross_pnl": 0.7,
+            "fees": 0.1,
+            "slippage_cost": 0.1,
+            "funding": 0.0,
+            "funding_assumption": "No funding interval crossed",
+            "cost_model": "test cost model",
+        }
+        event = {
+            "evaluation_id": "eval-v4-new",
+            "trade_id": "trade-v4-new",
+            "signal": "SELL",
+            "would_decision": "APPROVE",
+            "entry_gate_decision": "APPROVE",
+            "flip_direction": "SELL",
+            "proposal_direction": "SELL",
+            "outcome_recorded": True,
+            "features": features,
+            "realized_net_result": 0.5,
+            "outcome_label": "WIN",
+            "outcome_source": "PAPER_ESTIMATED",
+            "outcome_metadata": metadata,
+        }
+        outcome = {
+            "evaluation_id": "eval-v4-new",
+            "trade_id": "trade-v4-new",
+            "net_result": 0.5,
+            "label": "WIN",
+            "source": "PAPER_ESTIMATED",
+            "metadata": metadata,
+        }
+        weights = dict(memory["model"]["weights"])
+        bias = memory["model"]["bias"]
+        probability = _sigmoid(bias + sum(weights[name] * features[name] for name in V4_FEATURE_NAMES))
+        error = 1.0 - probability
+        for name in V4_FEATURE_NAMES:
+            old_weight = weights[name]
+            weights[name] = max(-8.0, min(8.0, old_weight + V4_LEARNING_RATE * (
+                error * features[name] - V4_L2_PENALTY * old_weight
+            )))
+        memory["model"]["weights"] = weights
+        memory["model"]["bias"] = max(-8.0, min(8.0, bias + V4_LEARNING_RATE * error))
+        memory["model"]["samples"] = 2
+        memory["model"]["wins"] = 2
+        memory["evaluations"].append(event)
+        memory["outcomes"].append(outcome)
+        memory["migration"]["active_outcome_count"] = 2
+        self.save_memory(memory)
+
+        summary = validate_recovery_state(self.root)
+        self.assertEqual(summary["ai_memory_schema_version"], 4)
+        self.assertEqual(self.read_memory()["model"]["samples"], 2)
+
     def test_rejects_incomplete_or_mismatched_manifest(self):
         manifest = json.loads((self.root / "manifest.json").read_text(encoding="utf-8"))
         manifest["destination_branch"] = "main"
