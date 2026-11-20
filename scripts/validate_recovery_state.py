@@ -280,19 +280,26 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
         active_trades.add(trade_id)
 
     legacy_by_id: dict[str, dict[str, Any]] = {}
+    legacy_trades: set[str] = set()
     for wrapper in legacy_outcomes:
         if not isinstance(wrapper, dict) or not isinstance(wrapper.get("outcome"), dict):
             raise RecoveryValidationError("Schema-v4 legacy outcome wrapper is invalid.")
         outcome = wrapper["outcome"]
         evaluation_id = outcome.get("evaluation_id")
+        trade_id = outcome.get("trade_id")
         if (
             wrapper.get("reason") not in V4_LEGACY_REASONS
             or not isinstance(evaluation_id, str)
             or evaluation_id not in source_by_id
+            or not isinstance(trade_id, str)
+            or not trade_id
+            or trade_id in legacy_trades
+            or trade_id in active_trades
             or _canonical(outcome) != _canonical(source_by_id[evaluation_id])
             or evaluation_id in legacy_by_id
         ):
             raise RecoveryValidationError("Schema-v4 legacy outcomes are not a unique value-preserving archive.")
+        legacy_trades.add(trade_id)
         legacy_by_id[evaluation_id] = outcome
     active_source_ids = set(active_by_id).intersection(source_by_id)
     if (
