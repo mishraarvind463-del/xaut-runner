@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import csv
 import gzip
+import hashlib
 import json
 import math
 import os
