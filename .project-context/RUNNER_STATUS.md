@@ -2,16 +2,16 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-20T09:41:36+05:30
+- Update timestamp (UTC): 2026-11-20T10:50:49+05:30
 - Branch: `main`
-- Commit: `07cc5e1e00fe180b0961bb38517f3dabd2aa64f0`
-- Commit message: test: align recovery branch assertion with workflow environment
+- Commit: `3460124ee333bc6403c7fa459bf95bde2341dba8`
+- Commit message: Validate verified-only AI memory schema v4 and source archive
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44672756030
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44680422876
 
 ## Changed paths
-- `M	tests/test_validate_recovery_state.py`
+- `M	scripts/validate_recovery_state.py`
 
 ## Required before changing runner behaviour
 1. Review `.github/workflows/setup-a.yml` and the exact diff.
