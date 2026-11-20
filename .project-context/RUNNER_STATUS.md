@@ -2,16 +2,16 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-20T17:13:25+05:30
+- Update timestamp (UTC): 2026-11-21T02:59:07+05:30
 - Branch: `main`
-- Commit: `17cb1e24107d56a315f25c556249a603d436db25`
-- Commit message: test: isolate active archived outcome identity tampering
+- Commit: `335f010e918019d97c7b49f07be4585d4c6f0410`
+- Commit message: Wire Qwen queue token into bot runtime
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44729910129
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44820709157
 
 ## Changed paths
-- `M	tests/test_validate_recovery_state.py`
+- `M	.github/workflows/setup-a.yml`
 
 ## Required before changing runner behaviour
 1. Review `.github/workflows/setup-a.yml` and the exact diff.
