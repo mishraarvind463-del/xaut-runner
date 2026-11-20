@@ -4,13 +4,22 @@ import copy
 import csv
 import gzip
 import json
+import math
 import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.validate_recovery_state import RecoveryValidationError, validate_recovery_state
+from scripts.validate_recovery_state import (
+    RecoveryValidationError,
+    V4_FEATURE_NAMES,
+    V4_INITIAL_WEIGHTS,
+    V4_L2_PENALTY,
+    V4_LEARNING_RATE,
+    _sigmoid,
+    validate_recovery_state,
+)
 
 
 class RecoveryStateValidatorTests(unittest.TestCase):
@@ -125,6 +134,142 @@ class RecoveryStateValidatorTests(unittest.TestCase):
                 self.save_memory(memory)
                 self.assertEqual(validate_recovery_state(self.root)["ai_memory_schema_version"], version)
 
+
+    def git_blob_sha(self, raw):
+        return hashlib.sha1(b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw).hexdigest()
+
+    def write_valid_v4_fixture(self):
+        archive = copy.deepcopy(self.memory)
+        archive["schema_version"] = 3
+        metadata = {
+            "source": "PAPER_ESTIMATED",
+            "currency": "USD",
+            "gross_pnl": 1.3,
+            "fees": 0.1,
+            "slippage_cost": 0.1,
+            "funding": 0.0,
+            "funding_assumption": "No funding interval crossed",
+            "cost_model": "test cost model",
+        }
+        features = {name: 0.25 for name in V4_FEATURE_NAMES}
+        event = {
+            "evaluation_id": "eval-v4-approved",
+            "trade_id": "trade-v4-approved",
+            "signal": "BUY",
+            "would_decision": "APPROVE",
+            "entry_gate_decision": "APPROVE",
+            "flip_direction": "BUY",
+            "proposal_direction": "BUY",
+            "outcome_recorded": True,
+            "features": features,
+            "realized_net_result": 1.1,
+            "outcome_label": "WIN",
+            "outcome_source": "PAPER_ESTIMATED",
+            "outcome_metadata": metadata,
+        }
+        outcome = {
+            "evaluation_id": "eval-v4-approved",
+            "trade_id": "trade-v4-approved",
+            "net_result": 1.1,
+            "label": "WIN",
+            "source": "PAPER_ESTIMATED",
+            "metadata": metadata,
+        }
+        archive["evaluations"] = [event]
+        archive["outcomes"] = [outcome]
+        archive["model"] = {
+            "weights": {name: 0.1 for name in V4_FEATURE_NAMES},
+            "bias": 0.4,
+            "samples": 1,
+            "wins": 1,
+            "losses": 0,
+        }
+        archive_bytes = (json.dumps(archive, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        source_sha = self.git_blob_sha(archive_bytes)
+
+        weights = dict(V4_INITIAL_WEIGHTS)
+        bias = 0.0
+        probability = _sigmoid(bias + sum(weights[name] * features[name] for name in V4_FEATURE_NAMES))
+        error = 1.0 - probability
+        for name in V4_FEATURE_NAMES:
+            old_weight = weights[name]
+            weights[name] = max(-8.0, min(8.0, old_weight + V4_LEARNING_RATE * (
+                error * features[name] - V4_L2_PENALTY * old_weight
+            )))
+        bias = max(-8.0, min(8.0, bias + V4_LEARNING_RATE * error))
+
+        memory = copy.deepcopy(archive)
+        memory["schema_version"] = 4
+        memory["model"] = {
+            "weights": weights,
+            "bias": bias,
+            "samples": 1,
+            "wins": 1,
+            "losses": 0,
+        }
+        memory["legacy_outcomes"] = []
+        memory["legacy_model_snapshot"] = copy.deepcopy(archive["model"])
+        memory["migration"] = {
+            "id": "verified-only-v1",
+            "from_schema_version": 3,
+            "source_blob_sha": source_sha,
+            "active_outcome_count": 1,
+            "legacy_outcome_count": 0,
+        }
+        (self.root / "ai_memory_v3_archive.json").write_bytes(archive_bytes)
+        self.save_memory(memory)
+        return archive, memory, archive_bytes
+
+    def test_accepts_valid_verified_only_schema_v4_fixture(self):
+        _, memory, _ = self.write_valid_v4_fixture()
+        summary = validate_recovery_state(self.root)
+        self.assertEqual(summary["ai_memory_schema_version"], 4)
+        self.assertEqual(memory["model"]["samples"], 1)
+        self.assertEqual(memory["migration"]["active_outcome_count"], 1)
+
+    def test_rejects_schema_v4_when_original_archive_is_missing_or_changed(self):
+        self.write_valid_v4_fixture()
+        (self.root / "ai_memory_v3_archive.json").unlink()
+        self.assert_invalid("Required recovery file is missing or empty: ai_memory_v3_archive.json")
+
+        self.write_valid_v4_fixture()
+        (self.root / "ai_memory_v3_archive.json").write_bytes(b"{}")
+        self.assert_invalid("archive Git blob SHA does not match")
+
+    def test_rejects_schema_v4_when_deterministic_model_or_archive_partition_differs(self):
+        self.write_valid_v4_fixture()
+        memory = self.read_memory()
+        memory["model"]["weights"]["ema_alignment"] += 0.01
+        self.save_memory(memory)
+        self.assert_invalid("weights do not match deterministic verified-only rebuild")
+
+        self.write_valid_v4_fixture()
+        memory = self.read_memory()
+        memory["outcomes"] = []
+        self.save_memory(memory)
+        self.assert_invalid("do not exactly partition")
+
+    def test_recovery_preflight_fetches_v3_archive_before_staging_v4_memory(self):
+        self.write_valid_v4_fixture()
+        result, workspace, sentinel = self._run_staging_script(valid=True)
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        self.assertIn("Schema-v4", result.stdout)
+        self.assertEqual(
+            (workspace / "ai_memory.json").read_bytes(),
+            (self.root / "ai_memory.json").read_bytes(),
+        )
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve this workspace file")
+
+    def test_recovery_preflight_does_not_stage_v4_when_archive_hash_is_wrong(self):
+        self.write_valid_v4_fixture()
+        (self.root / "ai_memory_v3_archive.json").write_bytes(b"not the original archive")
+        result, workspace, sentinel = self._run_staging_script(valid=True)
+        self.assertNotEqual(result.returncode, 0, msg=result.stdout)
+        self.assertIn("archive Git blob SHA does not match", result.stderr)
+        self.assertFalse((workspace / "ai_memory.json").exists())
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve this workspace file")
+
+
     def test_rejects_incomplete_or_mismatched_manifest(self):
         manifest = json.loads((self.root / "manifest.json").read_text(encoding="utf-8"))
         manifest["destination_branch"] = "main"
@@ -143,7 +288,7 @@ class RecoveryStateValidatorTests(unittest.TestCase):
 
     def test_rejects_unsupported_ai_schema(self):
         memory = copy.deepcopy(self.memory)
-        memory["schema_version"] = 4
+        memory["schema_version"] = 5
         self.save_memory(memory)
         self.assert_invalid("not a supported XAUTUSD memory object")
 
@@ -258,7 +403,7 @@ class RecoveryStateValidatorTests(unittest.TestCase):
             "'runtime-state/PRIVATE_STORAGE_MIGRATION.json': 'manifest.json', "
             "'runtime-state/bot_recovery_state.json': 'bot_recovery_state.json', "
             "'runtime-state/trade_history.csv': 'trade_history.csv', "
-            "'runtime-state/ai_memory.json': 'ai_memory.json', "
+            "'runtime-state/ai_memory.json': 'ai_memory.json', 'runtime-state/ai_memory_v3_archive.json': 'ai_memory_v3_archive.json', "
             "'runtime-state/shadow_trade_journal.jsonl.gz': 'shadow_trade_journal.jsonl.gz'}\n"
             "name = names.get(remote)\n"
             "if name is None: sys.exit(3)\n"
