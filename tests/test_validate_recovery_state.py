@@ -254,8 +254,7 @@ class RecoveryStateValidatorTests(unittest.TestCase):
     def test_verified_only_v4_still_rejects_changed_archived_outcome_or_counterfactual(self):
         self.write_valid_v4_fixture()
         memory = self.read_memory()
-        memory["outcomes"][0]["metadata"]["gross_pnl"] = 1.29
-        memory["evaluations"][0]["outcome_metadata"]["gross_pnl"] = 1.29
+        memory["outcomes"][0]["trade_id"] = "changed-trade-id"
         self.save_memory(memory)
         self.assert_invalid("active source outcome differs from immutable v3 archive")
 
