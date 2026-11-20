@@ -2,13 +2,13 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-20T09:39:48+05:30
+- Update timestamp (UTC): 2026-11-20T09:40:49+05:30
 - Branch: `main`
-- Commit: `9e35f9adb699633023dfe6b522334953cbc3f304`
-- Commit message: test: assert setup workflow calls isolated recovery staging script
+- Commit: `9dbc707a6d88e17e78e580608612069a7badab5a`
+- Commit message: test: fix fake GitHub CLI fixture script newlines
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44672550694
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44672670008
 
 ## Changed paths
 - `M	tests/test_validate_recovery_state.py`
