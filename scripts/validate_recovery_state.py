@@ -163,52 +163,53 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
     if not isinstance(legacy_model, dict) or not isinstance(active_outcomes, list):
         raise RecoveryValidationError("Schema-v4 model/outcome archive fields are invalid.")
     migration_id = migration.get("id")
-    if migration_id == "native-v4":
-        if (
-            active_outcomes
-            or legacy_outcomes
-            or model.get("samples") != 0
-            or migration.get("active_outcome_count") != 0
-            or migration.get("legacy_outcome_count") != 0
-        ):
-            raise RecoveryValidationError("Native schema-v4 memory must have an empty learning history.")
-        return
-    if migration_id != "verified-only-v1" or migration.get("from_schema_version") != 3:
-        raise RecoveryValidationError("Schema-v4 migration ID/version is unsupported.")
 
-    archive_path = _require_file(root, "ai_memory_v3_archive.json")
-    archive_bytes = archive_path.read_bytes()
-    archive_sha = hashlib.sha1(
-        b"blob " + str(len(archive_bytes)).encode("ascii") + b"\0" + archive_bytes
-    ).hexdigest()
-    if migration.get("source_blob_sha") != archive_sha:
-        raise RecoveryValidationError("Schema-v4 immutable v3 archive Git blob SHA does not match.")
-    try:
-        archive = json.loads(archive_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RecoveryValidationError(f"Schema-v4 immutable v3 archive is invalid JSON: {exc}") from exc
-    if not isinstance(archive, dict) or archive.get("schema_version") != 3 or archive.get("symbol") != "XAUTUSD":
-        raise RecoveryValidationError("Schema-v4 immutable archive is not the original XAUTUSD schema-v3 memory.")
-    if archive.get("model") != legacy_model:
-        raise RecoveryValidationError("Schema-v4 legacy model snapshot differs from immutable v3 archive.")
-    if archive.get("evaluations") != memory.get("evaluations"):
-        raise RecoveryValidationError("Schema-v4 evaluations differ from immutable v3 archive.")
-    if archive.get("counterfactual_outcomes") != memory.get("counterfactual_outcomes"):
-        raise RecoveryValidationError("Schema-v4 counterfactual outcomes differ from immutable v3 archive.")
-    source_outcomes = archive.get("outcomes")
-    if not isinstance(source_outcomes, list):
-        raise RecoveryValidationError("Immutable v3 archive outcomes are invalid.")
+    if migration_id == "verified-only-v1":
+        if migration.get("from_schema_version") != 3:
+            raise RecoveryValidationError("Schema-v4 migration ID/version is unsupported.")
+        archive_path = _require_file(root, "ai_memory_v3_archive.json")
+        archive_bytes = archive_path.read_bytes()
+        archive_sha = hashlib.sha1(
+            b"blob " + str(len(archive_bytes)).encode("ascii") + b"\0" + archive_bytes
+        ).hexdigest()
+        if migration.get("source_blob_sha") != archive_sha:
+            raise RecoveryValidationError("Schema-v4 immutable v3 archive Git blob SHA does not match.")
+        try:
+            archive = json.loads(archive_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RecoveryValidationError(f"Schema-v4 immutable v3 archive is invalid JSON: {exc}") from exc
+        if not isinstance(archive, dict) or archive.get("schema_version") != 3 or archive.get("symbol") != "XAUTUSD":
+            raise RecoveryValidationError("Schema-v4 immutable archive is not the original XAUTUSD schema-v3 memory.")
+        if archive.get("model") != legacy_model:
+            raise RecoveryValidationError("Schema-v4 legacy model snapshot differs from immutable v3 archive.")
+        if archive.get("evaluations") != memory.get("evaluations"):
+            raise RecoveryValidationError("Schema-v4 evaluations differ from immutable v3 archive.")
+        if archive.get("counterfactual_outcomes") != memory.get("counterfactual_outcomes"):
+            raise RecoveryValidationError("Schema-v4 counterfactual outcomes differ from immutable v3 archive.")
+        source_outcomes = archive.get("outcomes")
+        if not isinstance(source_outcomes, list):
+            raise RecoveryValidationError("Immutable v3 archive outcomes are invalid.")
+    elif migration_id == "native-v4":
+        if (
+            migration.get("from_schema_version") is not None
+            or migration.get("source_blob_sha") is not None
+            or legacy_outcomes
+        ):
+            raise RecoveryValidationError("Native schema-v4 archive metadata is invalid.")
+        source_outcomes = active_outcomes
+    else:
+        raise RecoveryValidationError("Schema-v4 migration ID/version is unsupported.")
 
     source_by_id: dict[str, dict[str, Any]] = {}
     source_trades: set[str] = set()
     for item in source_outcomes:
         if not isinstance(item, dict):
-            raise RecoveryValidationError("Immutable v3 archive contains a non-object outcome.")
+            raise RecoveryValidationError("Schema-v4 source outcomes must contain only objects.")
         evaluation_id, trade_id = item.get("evaluation_id"), item.get("trade_id")
         if not isinstance(evaluation_id, str) or not evaluation_id or evaluation_id in source_by_id:
-            raise RecoveryValidationError("Immutable v3 archive outcome evaluation IDs are missing or duplicated.")
+            raise RecoveryValidationError("Schema-v4 source outcome evaluation IDs are missing or duplicated.")
         if not isinstance(trade_id, str) or not trade_id or trade_id in source_trades:
-            raise RecoveryValidationError("Immutable v3 archive trade IDs are missing or duplicated.")
+            raise RecoveryValidationError("Schema-v4 source outcome trade IDs are missing or duplicated.")
         source_by_id[evaluation_id] = item
         source_trades.add(trade_id)
 
@@ -218,7 +219,12 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
         if not isinstance(outcome, dict):
             raise RecoveryValidationError("Schema-v4 active outcomes must contain only objects.")
         evaluation_id, trade_id = outcome.get("evaluation_id"), outcome.get("trade_id")
-        if evaluation_id not in source_by_id or _canonical(outcome) != _canonical(source_by_id[evaluation_id]):
+        if (
+            not isinstance(evaluation_id, str)
+            or not isinstance(trade_id, str)
+            or evaluation_id not in source_by_id
+            or _canonical(outcome) != _canonical(source_by_id[evaluation_id])
+        ):
             raise RecoveryValidationError("Schema-v4 active outcome is not an exact source-v3 outcome.")
         if evaluation_id in active_by_id or trade_id in active_trades:
             raise RecoveryValidationError("Schema-v4 active outcomes contain duplicate identities.")
@@ -233,6 +239,7 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
         evaluation_id = outcome.get("evaluation_id")
         if (
             wrapper.get("reason") not in V4_LEGACY_REASONS
+            or not isinstance(evaluation_id, str)
             or evaluation_id not in source_by_id
             or _canonical(outcome) != _canonical(source_by_id[evaluation_id])
             or evaluation_id in legacy_by_id
@@ -240,7 +247,7 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
             raise RecoveryValidationError("Schema-v4 legacy outcomes are not a unique value-preserving archive.")
         legacy_by_id[evaluation_id] = outcome
     if set(active_by_id).intersection(legacy_by_id) or set(active_by_id).union(legacy_by_id) != set(source_by_id):
-        raise RecoveryValidationError("Schema-v4 active and legacy outcomes do not exactly partition the v3 source outcomes.")
+        raise RecoveryValidationError("Schema-v4 active and legacy outcomes do not exactly partition the source outcomes.")
     if (
         migration.get("active_outcome_count") != len(active_outcomes)
         or migration.get("legacy_outcome_count") != len(legacy_outcomes)
@@ -250,11 +257,15 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
     evaluations = memory.get("evaluations")
     if not isinstance(evaluations, list):
         raise RecoveryValidationError("Schema-v4 evaluations are invalid.")
-    evaluation_by_id = {
-        item.get("evaluation_id"): item for item in evaluations if isinstance(item, dict)
-    }
-    if len(evaluation_by_id) != len(evaluations):
-        raise RecoveryValidationError("Schema-v4 evaluation identities are duplicated.")
+    evaluation_by_id = {}
+    for event in evaluations:
+        if not isinstance(event, dict):
+            raise RecoveryValidationError("Schema-v4 evaluation records must contain only objects.")
+        evaluation_id = event.get("evaluation_id")
+        if not isinstance(evaluation_id, str) or not evaluation_id or evaluation_id in evaluation_by_id:
+            raise RecoveryValidationError("Schema-v4 evaluation identities are missing or duplicated.")
+        evaluation_by_id[evaluation_id] = event
+
     rebuilt = {
         "weights": dict(V4_INITIAL_WEIGHTS),
         "bias": 0.0,
