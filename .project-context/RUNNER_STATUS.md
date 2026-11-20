@@ -2,16 +2,16 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-19T20:43:18+05:30
+- Update timestamp (UTC): 2026-11-20T09:31:52+05:30
 - Branch: `main`
-- Commit: `3cb78852f7e7702620a0814e6c2cbdabf8cb06ed`
-- Commit message: Strictly validate schema v3 counterfactual AI state
+- Commit: `63ce027e320b26ff4901ba37b920dff81ab82142`
+- Commit message: test: extract offline private recovery snapshot validator
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44552328784
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44671646110
 
 ## Changed paths
-- `M	.github/workflows/setup-a.yml`
+- `A	scripts/validate_recovery_state.py`
 
 ## Required before changing runner behaviour
 1. Review `.github/workflows/setup-a.yml` and the exact diff.
