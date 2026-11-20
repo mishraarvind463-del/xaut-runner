@@ -153,6 +153,7 @@ class RecoveryStateValidatorTests(unittest.TestCase):
             "cost_model": "test cost model",
         }
         features = {name: 0.25 for name in V4_FEATURE_NAMES}
+        features["ema_alignment"] = 1.0
         event = {
             "evaluation_id": "eval-v4-approved",
             "trade_id": "trade-v4-approved",
@@ -235,7 +236,6 @@ class RecoveryStateValidatorTests(unittest.TestCase):
         # JavaScript JSON.parse/JSON.stringify round-trip emits integral values
         # as JSON integers, without changing their numeric meaning.
         event = memory["evaluations"][0]
-        event["approval_score"] = 1
         event["features"]["ema_alignment"] = 1
         self.save_memory(memory)
         self.assertEqual(validate_recovery_state(self.root)["ai_memory_schema_version"], 4)
