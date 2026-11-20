@@ -2,13 +2,13 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-20T10:58:07+05:30
+- Update timestamp (UTC): 2026-11-20T10:58:45+05:30
 - Branch: `main`
-- Commit: `071464787a5bbdf86642f07038921b5e18059359`
-- Commit message: Allow verified new schema v4 outcomes after initial migration
+- Commit: `3da0bcbd0feea6ba0ed8c8f3668a0c971dd859d8`
+- Commit message: Preserve original v3 evidence while allowing new runtime evaluations
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44681223709
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44681288046
 
 ## Changed paths
 - `M	scripts/validate_recovery_state.py`
