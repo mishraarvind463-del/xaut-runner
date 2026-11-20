@@ -1,0 +1,33 @@
+name: Verify AI Recovery V4 Offline
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "scripts/validate_recovery_state.py"
+      - "scripts/prepare_private_recovery.sh"
+      - "tests/test_validate_recovery_state.py"
+      - ".github/workflows/verify-ai-recovery-v4.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-recovery-preflight-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile recovery validator
+        run: python -m py_compile scripts/validate_recovery_state.py
+      - name: Run recovery preflight and staging tests
+        run: python -m unittest discover -s tests -p "test_validate_recovery_state.py" -v
+      - name: Check recovery staging shell syntax
+        run: bash -n scripts/prepare_private_recovery.sh
