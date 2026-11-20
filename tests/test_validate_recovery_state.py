@@ -254,7 +254,7 @@ class RecoveryStateValidatorTests(unittest.TestCase):
         self.write_valid_v4_fixture()
         result, workspace, sentinel = self._run_staging_script(valid=True)
         self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
-        self.assertIn("Schema-v4", result.stdout)
+        self.assertIn("schema: 4", result.stdout)
         self.assertEqual(
             (workspace / "ai_memory.json").read_bytes(),
             (self.root / "ai_memory.json").read_bytes(),
