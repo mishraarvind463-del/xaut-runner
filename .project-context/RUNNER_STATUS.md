@@ -2,13 +2,13 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-20T17:10:08+05:30
+- Update timestamp (UTC): 2026-11-20T17:11:29+05:30
 - Branch: `main`
-- Commit: `d8f76d1d0ce74356dc5dc328f9e859e3b12247d7`
-- Commit message: test: mock authenticated git recovery fetch in staging tests
+- Commit: `39b0562273e0c41ee8ce69f2d9d268c3e2ea305c`
+- Commit message: test: fix fake git executable newline encoding
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44729473255
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44729655685
 
 ## Changed paths
 - `M	tests/test_validate_recovery_state.py`
