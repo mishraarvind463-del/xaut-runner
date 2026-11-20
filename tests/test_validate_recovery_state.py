@@ -472,24 +472,24 @@ class RecoveryStateValidatorTests(unittest.TestCase):
         fake_bin.mkdir(exist_ok=True)
         fake_git = fake_bin / "git"
         fake_git.write_text(
-            "#!/usr/bin/env python3\\n"
-            "import os, sys\\n"
-            "args = sys.argv[1:]\\n"
-            "if len(args) >= 2 and args[0] == '-C': args = args[2:]\\n"
-            "if 'init' in args or 'fetch' in args: sys.exit(0)\\n"
-            "if len(args) != 2 or args[0] != 'show' or ':' not in args[1]: sys.exit(2)\\n"
-            "remote = args[1].split(':', 1)[1]\\n"
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "args = sys.argv[1:]\n"
+            "if len(args) >= 2 and args[0] == '-C': args = args[2:]\n"
+            "if 'init' in args or 'fetch' in args: sys.exit(0)\n"
+            "if len(args) != 2 or args[0] != 'show' or ':' not in args[1]: sys.exit(2)\n"
+            "remote = args[1].split(':', 1)[1]\n"
             "names = {"
             "'runtime-state/PRIVATE_STORAGE_MIGRATION.json': 'manifest.json', "
             "'runtime-state/bot_recovery_state.json': 'bot_recovery_state.json', "
             "'runtime-state/trade_history.csv': 'trade_history.csv', "
             "'runtime-state/ai_memory.json': 'ai_memory.json', "
             "'runtime-state/ai_memory_v3_archive.json': 'ai_memory_v3_archive.json', "
-            "'runtime-state/shadow_trade_journal.jsonl.gz': 'shadow_trade_journal.jsonl.gz'}\\n"
-            "name = names.get(remote)\\n"
-            "if name is None: sys.exit(3)\\n"
-            "path = os.path.join(os.environ['FAKE_GIT_FIXTURE_ROOT'], name)\\n"
-            "with open(path, 'rb') as handle: sys.stdout.buffer.write(handle.read())\\n",
+            "'runtime-state/shadow_trade_journal.jsonl.gz': 'shadow_trade_journal.jsonl.gz'}\n"
+            "name = names.get(remote)\n"
+            "if name is None: sys.exit(3)\n"
+            "path = os.path.join(os.environ['FAKE_GIT_FIXTURE_ROOT'], name)\n"
+            "with open(path, 'rb') as handle: sys.stdout.buffer.write(handle.read())\n",
             encoding="utf-8",
         )
         fake_git.chmod(0o755)
