@@ -203,5 +203,30 @@ class RecoveryStateValidatorTests(unittest.TestCase):
         self.assert_invalid("ai_memory.json")
 
 
+    def test_trading_workflow_uses_tested_preflight_before_staging_memory(self):
+        workflow_path = (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "setup-a.yml"
+        )
+        workflow = workflow_path.read_text(encoding="utf-8")
+
+        validator_call = 'python scripts/validate_recovery_state.py "$TMP_DIR"'
+        stage_call = 'cp "$TMP_DIR/ai_memory.json" private-bot/ai_memory.json'
+        self.assertIn(validator_call, workflow)
+        self.assertLess(workflow.index(validator_call), workflow.index(stage_call))
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("default: false", workflow)
+        self.assertIn("ref: ai-managed-trading-v1", workflow)
+        self.assertIn('PRIVATE_BRANCH="xaut-recovery-state"', workflow)
+        self.assertIn("Wait for Delta IP Whitelisting", workflow)
+        self.assertIn("sleep 90", workflow)
+        self.assertIn("ENABLE_LIVE_TRADING: ${{ inputs.enable_live_trading && 'true' || 'false' }}", workflow)
+        self.assertIn("BOT_RUNTIME_MINUTES: ${{ inputs.runtime_minutes }}", workflow)
+        self.assertIn("run: python -u bot.py", workflow)
+        self.assertNotIn("<<'PY'", workflow)
+
+
 if __name__ == "__main__":
     unittest.main()
