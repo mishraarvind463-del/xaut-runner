@@ -2,16 +2,16 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-20T17:11:53+05:30
+- Update timestamp (UTC): 2026-11-20T17:12:50+05:30
 - Branch: `main`
-- Commit: `1ed4f2c2363bc57913ce6eb3b3f732ec8c97632d`
-- Commit message: ci: verify actual private recovery checkpoint in preflight
+- Commit: `0325ad3177c3a178f9bdda3b67c5ac143d788bf0`
+- Commit message: test: cover numeric JSON round-trip for archived outcomes
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44729708460
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44729833345
 
 ## Changed paths
-- `M	.github/workflows/verify-runner-recovery-preflight.yml`
+- `M	tests/test_validate_recovery_state.py`
 
 ## Required before changing runner behaviour
 1. Review `.github/workflows/setup-a.yml` and the exact diff.
