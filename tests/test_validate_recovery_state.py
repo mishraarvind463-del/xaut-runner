@@ -179,6 +179,7 @@ class RecoveryStateValidatorTests(unittest.TestCase):
         }
         archive["evaluations"] = [event]
         archive["outcomes"] = [outcome]
+        archive["counterfactual_outcomes"][0]["directional_move"] = 1.0
         archive["model"] = {
             "weights": {name: 0.1 for name in V4_FEATURE_NAMES},
             "bias": 0.4,
@@ -239,6 +240,30 @@ class RecoveryStateValidatorTests(unittest.TestCase):
         event["features"]["ema_alignment"] = 1
         self.save_memory(memory)
         self.assertEqual(validate_recovery_state(self.root)["ai_memory_schema_version"], 4)
+
+    def test_verified_only_v4_accepts_numeric_reserialization_of_archive_outcomes(self):
+        self.write_valid_v4_fixture()
+        memory = self.read_memory()
+        memory["evaluations"][0]["features"]["ema_alignment"] = 1
+        memory["evaluations"][0]["outcome_metadata"]["funding"] = 0
+        memory["outcomes"][0]["metadata"]["funding"] = 0
+        memory["counterfactual_outcomes"][0]["directional_move"] = 1
+        self.save_memory(memory)
+        self.assertEqual(validate_recovery_state(self.root)["ai_memory_schema_version"], 4)
+
+    def test_verified_only_v4_still_rejects_changed_archived_outcome_or_counterfactual(self):
+        self.write_valid_v4_fixture()
+        memory = self.read_memory()
+        memory["outcomes"][0]["metadata"]["gross_pnl"] = 1.29
+        memory["evaluations"][0]["outcome_metadata"]["gross_pnl"] = 1.29
+        self.save_memory(memory)
+        self.assert_invalid("active source outcome differs from immutable v3 archive")
+
+        self.write_valid_v4_fixture()
+        memory = self.read_memory()
+        memory["counterfactual_outcomes"][0]["directional_move"] = 0.99
+        self.save_memory(memory)
+        self.assert_invalid("original counterfactual outcomes are not preserved")
 
     def test_verified_only_v4_still_rejects_real_original_evaluation_changes(self):
         self.write_valid_v4_fixture()
