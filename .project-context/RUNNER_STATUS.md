@@ -2,16 +2,16 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-20T09:34:45+05:30
+- Update timestamp (UTC): 2026-11-20T09:38:22+05:30
 - Branch: `main`
-- Commit: `1cfe6b0e78d7557d18c49090f1160c2ef4d4f634`
-- Commit message: test: guard runner preflight wiring and paper defaults
+- Commit: `16e2f5d00a129fba707ced5f880d82d6d41c1dc4`
+- Commit message: refactor: isolate read-only private recovery staging step
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44671968396
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44672391908
 
 ## Changed paths
-- `M	tests/test_validate_recovery_state.py`
+- `A	scripts/prepare_private_recovery.sh`
 
 ## Required before changing runner behaviour
 1. Review `.github/workflows/setup-a.yml` and the exact diff.
