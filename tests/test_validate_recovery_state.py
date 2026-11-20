@@ -231,7 +231,7 @@ class RecoveryStateValidatorTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("default: false", workflow)
         self.assertIn("ref: ai-managed-trading-v1", workflow)
-        self.assertIn('PRIVATE_BRANCH="xaut-recovery-state"', workflow)
+        self.assertIn("PRIVATE_BRANCH: xaut-recovery-state", workflow)
         self.assertIn("Wait for Delta IP Whitelisting", workflow)
         self.assertIn("sleep 90", workflow)
         self.assertIn("ENABLE_LIVE_TRADING: ${{ inputs.enable_live_trading && 'true' || 'false' }}", workflow)
