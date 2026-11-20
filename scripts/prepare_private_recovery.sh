@@ -41,6 +41,14 @@ fetch_private_file "runtime-state/trade_history.csv" "$TMP_DIR/trade_history.csv
 fetch_private_file "runtime-state/ai_memory.json" "$TMP_DIR/ai_memory.json"
 fetch_private_file "runtime-state/shadow_trade_journal.jsonl.gz" "$TMP_DIR/shadow_trade_journal.jsonl.gz"
 
+# Schema-v4 verified-only migrations carry the exact original v3 bytes as a
+# separate immutable archive. Fetch it only for that migration type; legacy
+# schema-v1/v2/v3 and native-v4 snapshots do not require this extra object.
+migration_id="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("migration", {}).get("id", ""))' "$TMP_DIR/ai_memory.json")"
+if [ "$migration_id" = "verified-only-v1" ]; then
+  fetch_private_file "runtime-state/ai_memory_v3_archive.json" "$TMP_DIR/ai_memory_v3_archive.json"
+fi
+
 python "$SCRIPT_DIR/validate_recovery_state.py" "$TMP_DIR"
 
 # Only stage AI memory after every downloaded recovery file passes validation.
