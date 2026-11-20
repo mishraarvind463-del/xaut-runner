@@ -105,6 +105,27 @@ def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _canonical_learning_evidence(value: Any) -> str:
+    """Compare JSON learning evidence by numeric value, not int/float spelling.
+
+    JSON producers may serialize an unchanged 1.0 as 1. Both are the same
+    numeric evidence. Booleans remain booleans and non-integral values retain
+    full precision, so real learning-field changes are still rejected.
+    """
+    def normalize(item: Any) -> Any:
+        if isinstance(item, bool):
+            return item
+        if isinstance(item, float) and math.isfinite(item) and item.is_integer():
+            return int(item)
+        if isinstance(item, list):
+            return [normalize(child) for child in item]
+        if isinstance(item, dict):
+            return {key: normalize(child) for key, child in item.items()}
+        return item
+
+    return _canonical(normalize(value))
+
+
 def _validate_v4_financial_outcome(outcome: dict[str, Any], event: dict[str, Any]) -> float:
     metadata = outcome.get("metadata")
     if not isinstance(metadata, dict) or metadata != event.get("outcome_metadata"):
@@ -208,7 +229,7 @@ def _validate_v4_snapshot(root: Path, memory: dict[str, Any]) -> None:
             for mutable_field in ("counterfactual_horizons_recorded", "counterfactual_complete"):
                 archived_snapshot.pop(mutable_field, None)
                 current_snapshot.pop(mutable_field, None)
-            if _canonical(current_snapshot) != _canonical(archived_snapshot):
+            if _canonical_learning_evidence(current_snapshot) != _canonical_learning_evidence(archived_snapshot):
                 raise RecoveryValidationError("Schema-v4 original evaluation learning evidence changed.")
 
         archived_counterfactuals = archive.get("counterfactual_outcomes")
