@@ -2,13 +2,13 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-20T13:01:51+05:30
+- Update timestamp (UTC): 2026-11-20T13:04:08+05:30
 - Branch: `main`
-- Commit: `15d60d16cc80db86677d36db1671401c1dd0ec8f`
-- Commit message: Show private recovery API access error details
+- Commit: `87158ef183ee9ad025ae58e7e1c3bc22d371554d`
+- Commit message: Capture GitHub recovery API diagnostics correctly
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44695640295
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44695922103
 
 ## Changed paths
 - `M	scripts/prepare_private_recovery.sh`
