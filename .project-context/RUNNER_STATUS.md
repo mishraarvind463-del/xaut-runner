@@ -2,16 +2,16 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-20T10:58:45+05:30
+- Update timestamp (UTC): 2026-11-20T10:59:29+05:30
 - Branch: `main`
-- Commit: `3da0bcbd0feea6ba0ed8c8f3668a0c971dd859d8`
-- Commit message: Preserve original v3 evidence while allowing new runtime evaluations
+- Commit: `47c665e9810f0d1d9153a9db2a4aefff899c70aa`
+- Commit message: Test v4 preflight after additional verified learning outcomes
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44681288046
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44681364509
 
 ## Changed paths
-- `M	scripts/validate_recovery_state.py`
+- `M	tests/test_validate_recovery_state.py`
 
 ## Required before changing runner behaviour
 1. Review `.github/workflows/setup-a.yml` and the exact diff.
