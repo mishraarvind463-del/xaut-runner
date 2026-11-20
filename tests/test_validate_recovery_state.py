@@ -228,6 +228,25 @@ class RecoveryStateValidatorTests(unittest.TestCase):
         self.assertEqual(memory["model"]["samples"], 1)
         self.assertEqual(memory["migration"]["active_outcome_count"], 1)
 
+    def test_verified_only_v4_accepts_numeric_json_reserialization_without_learning_change(self):
+        self.write_valid_v4_fixture()
+        memory = self.read_memory()
+        # The immutable v3 archive stores these values as JSON floats. A
+        # JavaScript JSON.parse/JSON.stringify round-trip emits integral values
+        # as JSON integers, without changing their numeric meaning.
+        event = memory["evaluations"][0]
+        event["approval_score"] = 1
+        event["features"]["ema_alignment"] = 1
+        self.save_memory(memory)
+        self.assertEqual(validate_recovery_state(self.root)["ai_memory_schema_version"], 4)
+
+    def test_verified_only_v4_still_rejects_real_original_evaluation_changes(self):
+        self.write_valid_v4_fixture()
+        memory = self.read_memory()
+        memory["evaluations"][0]["features"]["ema_alignment"] = 0.99
+        self.save_memory(memory)
+        self.assert_invalid("original evaluation learning evidence changed")
+
     def test_rejects_schema_v4_when_original_archive_is_missing_or_changed(self):
         self.write_valid_v4_fixture()
         (self.root / "ai_memory_v3_archive.json").unlink()
