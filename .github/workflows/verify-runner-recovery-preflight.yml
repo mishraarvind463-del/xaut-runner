@@ -1,0 +1,47 @@
+name: Verify Runner Recovery Preflight
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/validate_recovery_state.py"
+      - "tests/test_validate_recovery_state.py"
+      - ".github/workflows/verify-runner-recovery-preflight.yml"
+      - ".github/workflows/setup-a.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "scripts/validate_recovery_state.py"
+      - "tests/test_validate_recovery_state.py"
+      - ".github/workflows/verify-runner-recovery-preflight.yml"
+      - ".github/workflows/setup-a.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-runner-recovery-preflight
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate disposable recovery fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout runner source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Compile offline validator
+        run: python -m py_compile scripts/validate_recovery_state.py tests/test_validate_recovery_state.py
+
+      - name: Run disposable fixture tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
