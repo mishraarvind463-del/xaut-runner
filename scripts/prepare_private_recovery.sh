@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Download, validate and stage the private recovery snapshot.
+# GH_TOKEN must be supplied by the caller. This script never writes to the
+# remote recovery branch; it only reads GitHub Contents API responses and
+# copies the validated AI-memory bytes into the ephemeral bot checkout.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+PRIVATE_REPO="$(printenv PRIVATE_REPO 2>/dev/null || printf '%s' 'mishraarvind463-del/xaut-bot')"
+PRIVATE_BRANCH="$(printenv PRIVATE_BRANCH 2>/dev/null || printf '%s' 'xaut-recovery-state')"
+BOT_WORKSPACE="$(printenv BOT_WORKSPACE 2>/dev/null || printf '%s' 'private-bot')"
+GH_TOKEN="$(printenv GH_TOKEN 2>/dev/null || true)"
+
+if [ -z "$GH_TOKEN" ]; then
+  echo "GH_TOKEN is required to read private recovery state." >&2
+  exit 1
+fi
+
+if [ ! -d "$BOT_WORKSPACE" ]; then
+  echo "Bot workspace does not exist: $BOT_WORKSPACE" >&2
+  exit 1
+fi
+
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+echo "Checking read access to the private recovery repository and branch."
+gh api "repos/$PRIVATE_REPO/branches/$PRIVATE_BRANCH" >/dev/null
+
+fetch_private_file() {
+  local remote_path="$1"
+  local local_path="$2"
+  gh api "repos/$PRIVATE_REPO/contents/$remote_path?ref=$PRIVATE_BRANCH" \
+    --jq '.content' | tr -d '\n' | base64 --decode > "$local_path"
+  test -s "$local_path"
+}
+
+fetch_private_file "runtime-state/PRIVATE_STORAGE_MIGRATION.json" "$TMP_DIR/manifest.json"
+fetch_private_file "runtime-state/bot_recovery_state.json" "$TMP_DIR/bot_recovery_state.json"
+fetch_private_file "runtime-state/trade_history.csv" "$TMP_DIR/trade_history.csv"
+fetch_private_file "runtime-state/ai_memory.json" "$TMP_DIR/ai_memory.json"
+fetch_private_file "runtime-state/shadow_trade_journal.jsonl.gz" "$TMP_DIR/shadow_trade_journal.jsonl.gz"
+
+python "$SCRIPT_DIR/validate_recovery_state.py" "$TMP_DIR"
+
+# Only stage AI memory after every downloaded recovery file passes validation.
+cp "$TMP_DIR/ai_memory.json" "$BOT_WORKSPACE/ai_memory.json"
+echo "Verified private AI memory staged in runner workspace."
