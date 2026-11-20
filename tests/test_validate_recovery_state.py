@@ -247,23 +247,23 @@ class RecoveryStateValidatorTests(unittest.TestCase):
         fake_bin.mkdir(exist_ok=True)
         fake_gh = fake_bin / "gh"
         fake_gh.write_text(
-            "#!/usr/bin/env python3\\n"
-            "import base64, os, sys\\n"
-            "args = sys.argv[1:]\\n"
-            "if len(args) < 2 or args[0] != 'api': sys.exit(2)\\n"
-            "endpoint = args[1]\\n"
-            "if '/branches/' in endpoint: print('{}'); sys.exit(0)\\n"
-            "remote = endpoint.split('/contents/', 1)[1].split('?ref=', 1)[0]\\n"
+            "#!/usr/bin/env python3\n"
+            "import base64, os, sys\n"
+            "args = sys.argv[1:]\n"
+            "if len(args) < 2 or args[0] != 'api': sys.exit(2)\n"
+            "endpoint = args[1]\n"
+            "if '/branches/' in endpoint: print('{}'); sys.exit(0)\n"
+            "remote = endpoint.split('/contents/', 1)[1].split('?ref=', 1)[0]\n"
             "names = {"
             "'runtime-state/PRIVATE_STORAGE_MIGRATION.json': 'manifest.json', "
             "'runtime-state/bot_recovery_state.json': 'bot_recovery_state.json', "
             "'runtime-state/trade_history.csv': 'trade_history.csv', "
             "'runtime-state/ai_memory.json': 'ai_memory.json', "
-            "'runtime-state/shadow_trade_journal.jsonl.gz': 'shadow_trade_journal.jsonl.gz'}\\n"
-            "name = names.get(remote)\\n"
-            "if name is None: sys.exit(3)\\n"
-            "path = os.path.join(os.environ['FAKE_GH_FIXTURE_ROOT'], name)\\n"
-            "with open(path, 'rb') as handle: print(base64.b64encode(handle.read()).decode('ascii'))\\n",
+            "'runtime-state/shadow_trade_journal.jsonl.gz': 'shadow_trade_journal.jsonl.gz'}\n"
+            "name = names.get(remote)\n"
+            "if name is None: sys.exit(3)\n"
+            "path = os.path.join(os.environ['FAKE_GH_FIXTURE_ROOT'], name)\n"
+            "with open(path, 'rb') as handle: print(base64.b64encode(handle.read()).decode('ascii'))\n",
             encoding="utf-8",
         )
         fake_gh.chmod(0o755)
