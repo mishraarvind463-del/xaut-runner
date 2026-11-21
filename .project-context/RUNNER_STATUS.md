@@ -2,13 +2,13 @@
 
 > Automatically refreshed after pushes to `main`. This is commit metadata, not a security or workflow validation result.
 
-- Update timestamp (UTC): 2026-11-21T02:59:07+05:30
+- Update timestamp (UTC): 2026-11-21T14:03:38+05:30
 - Branch: `main`
-- Commit: `335f010e918019d97c7b49f07be4585d4c6f0410`
-- Commit message: Wire Qwen queue token into bot runtime
+- Commit: `2f130151c2dd1661e0b4c73e70a3b5657925df13`
+- Commit message: Remove Qwen queue credential from bot workflow
 - Commit author: mishraarvind463-del
 - Context review: **REQUIRED — runner source/config/workflow changed.** Review the diff and confirm the private bot ref, paper default, IP-whitelist wait and secrets usage.
-- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44820709157
+- Triggering workflow: https://github.com/mishraarvind463-del/xaut-runner/actions/runs/44885455293
 
 ## Changed paths
 - `M	.github/workflows/setup-a.yml`
